@@ -331,7 +331,9 @@ const styles = {
     cursor: 'pointer',
     userSelect: 'none' as const,
     transition: 'all 0.1s ease',
-    borderBottom: '2px solid transparent',
+    borderBottomWidth: '2px',
+    borderBottomStyle: 'solid' as const,
+    borderBottomColor: 'transparent',
     padding: '0 2px',
   },
   wordCompleted: {

@@ -307,7 +307,9 @@ const styles = {
     fontSize: '0.85rem',
     fontWeight: 'bold' as const,
     cursor: 'pointer',
-    borderBottom: '2px solid transparent',
+    borderBottomWidth: '2px',
+    borderBottomStyle: 'solid' as const,
+    borderBottomColor: 'transparent',
     transition: 'all 0.15s ease',
   },
   tabBtnActive: {
