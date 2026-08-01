@@ -163,7 +163,6 @@ export function Toolbar({
     if (selectedSong) {
       await handleSelectSong(selectedSong);
     } else if (doc.metadata.title) {
-      // Look up current title in manifest if available
       const matched = manifest.find(
         (s) => s.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
       );
@@ -248,30 +247,57 @@ export function Toolbar({
       (item) => item.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
     );
     const paddedDay = matchedSong ? String(matchedSong.index).padStart(2, '0') : '01';
-    const storagePath = `lyrics/${monthPath}/${paddedDay} - ${doc.metadata.title}.lrc`;
+    const cleanTitle = doc.metadata.title.trim();
+    const fileName = `${paddedDay} - ${cleanTitle}.lrc`;
+    const storagePath = `lyrics/${monthPath}/${fileName}`;
     setSyncTargetPath(storagePath);
 
     try {
       const activeClient = getSupabaseClient(keyOverride);
       const fileBlob = new Blob([formattedLrc], { type: 'text/plain;charset=utf-8' });
 
-      const { error } = await activeClient.storage
+      // Primary upload attempt
+      let { error } = await activeClient.storage
         .from('releaseready')
         .upload(storagePath, fileBlob, {
           cacheControl: '3600',
           upsert: true,
+          contentType: 'text/plain;charset=utf-8',
         });
+
+      // Encoded path fallback retry if 400
+      if (error && (error as any).statusCode === 400) {
+        const encodedPath = `lyrics/${monthPath}/${encodeURIComponent(fileName)}`;
+        const retryRes = await activeClient.storage
+          .from('releaseready')
+          .upload(encodedPath, fileBlob, {
+            cacheControl: '3600',
+            upsert: true,
+            contentType: 'text/plain;charset=utf-8',
+          });
+        if (!retryRes.error) {
+          error = null;
+        }
+      }
 
       if (error) throw error;
 
       setSyncStatus('success');
       setShowSyncModal(true);
     } catch (err: any) {
-      console.error('Database Sync Error:', err);
+      console.warn('Database Storage Sync Exception:', err);
+      const isRlsError =
+        err?.message?.includes('row-level security') ||
+        err?.statusCode === '403' ||
+        err?.statusCode === 403 ||
+        err?.error === 'Unauthorized' ||
+        err?.message?.includes('violates row-level security');
+
       setSyncStatus('error');
       setSyncErrorMessage(
-        err.message ||
-          'Storage Row-Level Security (RLS) policy restricted anonymous write operations on the releaseready bucket.'
+        isRlsError
+          ? 'Storage Row-Level Security (RLS) Restriction: Anonymous write operations are blocked on the releaseready bucket. Please enter a Supabase Service Role Key below or download/copy your LRC file.'
+          : err.message || 'Storage upload failed. Please verify storage permissions or use direct download.'
       );
       setShowSyncModal(true);
     } finally {
@@ -382,6 +408,14 @@ export function Toolbar({
         >
           {isSyncing ? 'Syncing...' : 'Sync Database'}
         </button>
+        <button
+          className="btn"
+          style={{ padding: '6px 10px' }}
+          onClick={() => setShowSyncModal(true)}
+          title="Sync & Storage Credentials Settings"
+        >
+          ⚙️
+        </button>
         <button className="btn btn-primary" onClick={onDownload}>
           Export LRC (.lrc)
         </button>
@@ -422,7 +456,7 @@ export function Toolbar({
               <div style={styles.targetInfo}>
                 <span style={{ color: 'var(--text-muted)' }}>Target Storage Path: </span>
                 <span className="mono" style={{ color: 'var(--accent-cyan)' }}>
-                  {syncTargetPath}
+                  {syncTargetPath || 'lyrics/month/01 - title.lrc'}
                 </span>
               </div>
 
@@ -435,14 +469,14 @@ export function Toolbar({
               {syncStatus === 'error' && (
                 <div style={styles.errorBanner}>
                   <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                    ⚠️ Storage Authorization Required (Anon Write Failure)
+                    ⚠️ Storage Authorization / Permission Notice
                   </div>
                   <div style={{ fontSize: '0.85rem' }}>{syncErrorMessage}</div>
                 </div>
               )}
 
               <div style={styles.keySection}>
-                <label style={styles.label}>Supabase Write Key / Service Role Key (Optional)</label>
+                <label style={styles.label}>Supabase Service Role Key / Write Credential (Optional)</label>
                 <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
                   <input
                     type="password"
@@ -461,13 +495,13 @@ export function Toolbar({
                   </button>
                 </div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  Key will be securely stored in your local browser storage for future sync requests.
+                  Providing a write key bypasses public RLS restrictions and writes directly to Supabase storage.
                 </div>
               </div>
 
               <div style={styles.fallbackSection}>
                 <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-secondary)' }}>
-                  One-Click Offline Options:
+                  Offline & Fallback Export Actions:
                 </span>
                 <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
                   <button className="btn" onClick={handleCopyToClipboard}>
