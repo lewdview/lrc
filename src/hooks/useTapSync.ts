@@ -14,6 +14,11 @@ export interface UseTapSync {
   nudgeWordTimestamp: (lineIndex: number, wordIndex: number, deltaMs: number) => void;
   clearWordTimestamp: (lineIndex: number, wordIndex: number) => void;
   setWordTimestamp: (lineIndex: number, wordIndex: number, timestamp: number | null) => void;
+  editWordText: (lineIndex: number, wordIndex: number, newText: string) => void;
+  addWordToLine: (lineIndex: number, afterWordIndex?: number, wordText?: string) => void;
+  deleteWord: (lineIndex: number, wordIndex: number) => void;
+  addLine: (afterLineIndex?: number) => void;
+  deleteLine: (lineIndex: number) => void;
   jumpToWord: (lineIndex: number, wordIndex: number) => void;
   jumpToFirstUnsynced: () => void;
   jumpToLastWord: () => void;
@@ -54,7 +59,6 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
 
   // Sync current word and advance cursor
   const syncNextWord = useCallback((timestamp: number) => {
-    // 1. Copy lines
     const newLines = lines.map((line, lIdx) => {
       if (lIdx !== activeLineIndex) return line;
       return {
@@ -69,14 +73,12 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     saveStateToHistory(lines, metadata);
     setLinesState(newLines);
 
-    // 2. Advance pointer
+    // Advance pointer
     const currentLine = lines[activeLineIndex];
     if (currentLine) {
       if (activeWordIndex < currentLine.words.length - 1) {
-        // Next word in current line
         setActiveWordIndex(activeWordIndex + 1);
       } else if (activeLineIndex < lines.length - 1) {
-        // Next line, first word
         setActiveLineIndex(activeLineIndex + 1);
         setActiveWordIndex(0);
       }
@@ -144,7 +146,6 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     if (!targetWord || targetWord.timestamp === null) return;
 
     const newTimestamp = Math.max(0, targetWord.timestamp + deltaMs);
-
     const newLines = lines.map((line, lIdx) => {
       if (lIdx !== lineIndex) return line;
       return {
@@ -160,7 +161,7 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     setLinesState(newLines);
   }, [lines, metadata, saveStateToHistory]);
 
-  // Clear timestamp
+  // Clear single word timestamp
   const clearWordTimestamp = useCallback((lineIndex: number, wordIndex: number) => {
     const newLines = lines.map((line, lIdx) => {
       if (lIdx !== lineIndex) return line;
@@ -192,6 +193,83 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
 
     saveStateToHistory(lines, metadata);
     setLinesState(newLines);
+  }, [lines, metadata, saveStateToHistory]);
+
+  // Edit text of a word
+  const editWordText = useCallback((lineIndex: number, wordIndex: number, newText: string) => {
+    const newLines = lines.map((line, lIdx) => {
+      if (lIdx !== lineIndex) return line;
+      return {
+        ...line,
+        words: line.words.map((word, wIdx) => {
+          if (wIdx !== wordIndex) return word;
+          return { ...word, text: newText };
+        }),
+      };
+    });
+
+    saveStateToHistory(lines, metadata);
+    setLinesState(newLines);
+  }, [lines, metadata, saveStateToHistory]);
+
+  // Add a new word to a line
+  const addWordToLine = useCallback((lineIndex: number, afterWordIndex?: number, wordText: string = 'word') => {
+    const newLines = lines.map((line, lIdx) => {
+      if (lIdx !== lineIndex) return line;
+      const newWords = [...line.words];
+      const insertIdx = afterWordIndex !== undefined ? afterWordIndex + 1 : newWords.length;
+      newWords.splice(insertIdx, 0, {
+        id: Math.random().toString(36).substring(2, 9),
+        text: wordText,
+        timestamp: null,
+      });
+      return { ...line, words: newWords };
+    });
+
+    saveStateToHistory(lines, metadata);
+    setLinesState(newLines);
+  }, [lines, metadata, saveStateToHistory]);
+
+  // Delete a word from a line
+  const deleteWord = useCallback((lineIndex: number, wordIndex: number) => {
+    const newLines = lines.map((line, lIdx) => {
+      if (lIdx !== lineIndex) return line;
+      const newWords = line.words.filter((_, wIdx) => wIdx !== wordIndex);
+      return { ...line, words: newWords };
+    });
+
+    saveStateToHistory(lines, metadata);
+    setLinesState(newLines);
+  }, [lines, metadata, saveStateToHistory]);
+
+  // Add a new line
+  const addLine = useCallback((afterLineIndex?: number) => {
+    const newLines = [...lines];
+    const insertIdx = afterLineIndex !== undefined ? afterLineIndex + 1 : newLines.length;
+    newLines.splice(insertIdx, 0, {
+      id: Math.random().toString(36).substring(2, 9),
+      words: [{
+        id: Math.random().toString(36).substring(2, 9),
+        text: 'word',
+        timestamp: null,
+      }],
+    });
+
+    saveStateToHistory(lines, metadata);
+    setLinesState(newLines);
+    setActiveLineIndex(insertIdx);
+    setActiveWordIndex(0);
+  }, [lines, metadata, saveStateToHistory]);
+
+  // Delete a line
+  const deleteLine = useCallback((lineIndex: number) => {
+    if (lines.length <= 1) return;
+    const newLines = lines.filter((_, lIdx) => lIdx !== lineIndex);
+
+    saveStateToHistory(lines, metadata);
+    setLinesState(newLines);
+    setActiveLineIndex((prev) => Math.min(prev, newLines.length - 1));
+    setActiveWordIndex(0);
   }, [lines, metadata, saveStateToHistory]);
 
   // Undo Action
@@ -250,6 +328,11 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     nudgeWordTimestamp,
     clearWordTimestamp,
     setWordTimestamp,
+    editWordText,
+    addWordToLine,
+    deleteWord,
+    addLine,
+    deleteLine,
     jumpToWord,
     jumpToFirstUnsynced,
     jumpToLastWord,

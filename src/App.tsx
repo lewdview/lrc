@@ -43,6 +43,18 @@ export default function App() {
     }
   }, []);
 
+  // Sync rawText back whenever lines change due to word editing
+  useEffect(() => {
+    if (tapSync.lines && tapSync.lines.length > 0) {
+      const regeneratedRaw = tapSync.lines
+        .map((line) => line.words.map((w) => w.text).join(' '))
+        .join('\n');
+      if (regeneratedRaw !== rawText) {
+        setRawText(regeneratedRaw);
+      }
+    }
+  }, [tapSync.lines]);
+
   // Autosave periodically
   useEffect(() => {
     const interval = setInterval(() => {
@@ -52,7 +64,7 @@ export default function App() {
         metadata: tapSync.metadata,
       };
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
-      
+
       const now = new Date();
       setLastSaved(
         `${now.getHours().toString().padStart(2, '0')}:${now
@@ -221,9 +233,11 @@ export default function App() {
               activeWordIndex={tapSync.activeWordIndex}
               onSeek={audioClock.seek}
               onNudge={tapSync.nudgeWordTimestamp}
-              onClear={tapSync.clearWordTimestamp}
               onSetTimestamp={tapSync.setWordTimestamp}
               onSelectWord={tapSync.jumpToWord}
+              onEditWordText={tapSync.editWordText}
+              onAddWord={tapSync.addWordToLine}
+              onDeleteWord={tapSync.deleteWord}
             />
 
             {/* Sync Viewport Area */}
@@ -235,6 +249,10 @@ export default function App() {
                 currentTime={audioClock.currentTime}
                 onWordClick={tapSync.jumpToWord}
                 onReTimeLine={tapSync.reTimeLine}
+                onEditWordText={tapSync.editWordText}
+                onAddWord={tapSync.addWordToLine}
+                onDeleteWord={tapSync.deleteWord}
+                onAddLine={tapSync.addLine}
               />
             </div>
           </div>
@@ -242,7 +260,7 @@ export default function App() {
       </div>
 
       <MetadataPanel metadata={tapSync.metadata} onChange={tapSync.setMetadata} />
-      
+
       <StatusBar lines={tapSync.lines} lastSaved={lastSaved} />
     </div>
   );
@@ -256,9 +274,9 @@ function parseLyrics(text: string): Line[] {
     const rawWords = trimmed ? trimmed.split(/\s+/) : [];
     return {
       id: Math.random().toString(36).substring(2, 9),
-      words: rawWords.map((w) => ({
+      words: rawWords.map((wordText) => ({
         id: Math.random().toString(36).substring(2, 9),
-        text: w,
+        text: wordText,
         timestamp: null,
       })),
     };
@@ -273,38 +291,40 @@ const styles = {
     width: '100vw',
     backgroundColor: 'var(--bg-primary)',
     color: 'var(--text-primary)',
+    overflow: 'hidden',
   },
   tabsBar: {
-    height: '35px',
-    backgroundColor: 'var(--bg-tertiary)',
-    borderBottom: '1px solid var(--border-color)',
     display: 'flex',
+    backgroundColor: 'var(--bg-secondary)',
+    borderBottom: '1px solid var(--border-color)',
+    padding: '0 20px',
   },
   tabBtn: {
-    backgroundColor: 'transparent',
+    background: 'none',
     border: 'none',
-    borderRight: '1px solid var(--border-color)',
-    color: 'var(--text-secondary)',
-    padding: '0 20px',
-    fontSize: '0.8rem',
-    fontWeight: 600,
+    padding: '10px 20px',
+    color: 'var(--text-muted)',
+    fontSize: '0.85rem',
+    fontWeight: 'bold' as const,
     cursor: 'pointer',
-    fontFamily: 'var(--font-sans)',
+    borderBottom: '2px solid transparent',
     transition: 'all 0.15s ease',
   },
   tabBtnActive: {
-    backgroundColor: 'var(--bg-primary)',
     color: 'var(--accent-cyan)',
-    borderBottom: '1px solid var(--bg-primary)',
+    borderBottomColor: 'var(--accent-cyan)',
   },
   mainContent: {
     flexGrow: 1,
-    overflow: 'hidden' as const,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
     position: 'relative' as const,
   },
   workspace: {
     display: 'flex',
+    flexGrow: 1,
     height: '100%',
-    width: '100%',
+    overflow: 'hidden',
   },
 };

@@ -2,7 +2,12 @@ import React, { useState, useEffect } from 'react';
 import type { LyricsDocument } from '../types/lyric';
 import { formatEnhancedLRC } from '../utils/exportLRC';
 import { reconstructLinesFromAnalysis } from '../utils/parser';
-import { supabase } from '../services/supabaseClient';
+import {
+  getSupabaseClient,
+  getStoredSupabaseKey,
+  setStoredSupabaseKey,
+  SUPABASE_ANON_KEY,
+} from '../services/supabaseClient';
 
 interface ManifestItem {
   month: string;
@@ -59,6 +64,15 @@ export function Toolbar({
   const [showDropdown, setShowDropdown] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Sync Modal State
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [syncErrorMessage, setSyncErrorMessage] = useState('');
+  const [syncTargetPath, setSyncTargetPath] = useState('');
+  const [customKeyInput, setCustomKeyInput] = useState(
+    getStoredSupabaseKey() === SUPABASE_ANON_KEY ? '' : getStoredSupabaseKey()
+  );
 
   // Load manifest on mount
   useEffect(() => {
@@ -137,9 +151,9 @@ export function Toolbar({
     if (file) {
       const url = URL.createObjectURL(file);
       setAudioUrl(url);
-      
-      const baseName = file.name.replace(/\.[^/.]+$/, "");
-      const parts = baseName.split(" - ");
+
+      const baseName = file.name.replace(/\.[^/.]+$/, '');
+      const parts = baseName.split(' - ');
       if (parts.length === 2) {
         setMetadata({
           title: parts[1],
@@ -166,20 +180,35 @@ export function Toolbar({
     alert('Copied Enhanced LRC to clipboard!');
   };
 
-  // Sync to database bucket
-  const handleSyncToDatabase = async () => {
+  // Execute database upload with active or custom key
+  const executeSyncUpload = async (keyOverride?: string) => {
     if (!doc.metadata.title) {
       alert('Please load or enter a song title before syncing.');
       return;
     }
-    
+
     setIsSyncing(true);
+    setSyncStatus('idle');
+    setSyncErrorMessage('');
+
     const formattedLrc = formatEnhancedLRC(doc);
     const month = (doc.metadata.album || 'january').toLowerCase();
-    
-    // Determine month path
+
     let monthPath = 'january';
-    const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const months = [
+      'january',
+      'february',
+      'march',
+      'april',
+      'may',
+      'june',
+      'july',
+      'august',
+      'september',
+      'october',
+      'november',
+      'december',
+    ];
     for (const m of months) {
       if (month.includes(m)) {
         monthPath = m;
@@ -187,17 +216,18 @@ export function Toolbar({
       }
     }
 
-    // Find song in manifest to get original index/extension
     const matchedSong = manifest.find(
       (item) => item.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
     );
     const paddedDay = matchedSong ? String(matchedSong.index).padStart(2, '0') : '01';
     const storagePath = `lyrics/${monthPath}/${paddedDay} - ${doc.metadata.title}.lrc`;
+    setSyncTargetPath(storagePath);
 
     try {
+      const activeClient = getSupabaseClient(keyOverride);
       const fileBlob = new Blob([formattedLrc], { type: 'text/plain;charset=utf-8' });
-      
-      const { error } = await supabase.storage
+
+      const { error } = await activeClient.storage
         .from('releaseready')
         .upload(storagePath, fileBlob, {
           cacheControl: '3600',
@@ -205,21 +235,32 @@ export function Toolbar({
         });
 
       if (error) throw error;
-      
-      alert(`Synced! Enhanced LRC successfully uploaded to the 'releaseready' bucket under: \n${storagePath}`);
+
+      setSyncStatus('success');
+      setShowSyncModal(true);
     } catch (err: any) {
       console.error('Database Sync Error:', err);
-      alert(`Sync Failed: ${err.message || err}\n\n(Note: Public anon keys have read-only storage permissions. Make sure write access is granted or run with service permissions.)`);
+      setSyncStatus('error');
+      setSyncErrorMessage(
+        err.message ||
+          'Storage Row-Level Security (RLS) policy restricted anonymous write operations on the releaseready bucket.'
+      );
+      setShowSyncModal(true);
     } finally {
       setIsSyncing(false);
     }
+  };
+
+  const handleSaveKeyAndRetry = () => {
+    setStoredSupabaseKey(customKeyInput);
+    executeSyncUpload(customKeyInput || undefined);
   };
 
   return (
     <div style={styles.toolbar}>
       <div style={styles.left}>
         <div style={styles.logo}>th3scr1b3 LRC v2</div>
-        
+
         {/* Song search */}
         <div style={{ position: 'relative' }}>
           <input
@@ -275,8 +316,12 @@ export function Toolbar({
         </button>
         <button
           className="btn btn-primary"
-          style={{ backgroundColor: 'var(--accent-amber)', borderColor: 'var(--accent-amber)', color: 'var(--bg-primary)' }}
-          onClick={handleSyncToDatabase}
+          style={{
+            backgroundColor: 'var(--accent-amber)',
+            borderColor: 'var(--accent-amber)',
+            color: 'var(--bg-primary)',
+          }}
+          onClick={() => executeSyncUpload()}
           disabled={isSyncing}
         >
           {isSyncing ? 'Syncing...' : 'Sync Database'}
@@ -289,6 +334,7 @@ export function Toolbar({
         </button>
       </div>
 
+      {/* Preview Modal */}
       {previewContent !== null && (
         <div style={styles.modalOverlay} onClick={() => setPreviewContent(null)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -301,6 +347,82 @@ export function Toolbar({
             <pre style={styles.previewContainer} className="mono">
               {previewContent || '// Sync some words first to generate LRC'}
             </pre>
+          </div>
+        </div>
+      )}
+
+      {/* Sync & Storage Authorization Modal */}
+      {showSyncModal && (
+        <div style={styles.modalOverlay} onClick={() => setShowSyncModal(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3>Database Storage Sync</h3>
+              <button className="btn btn-danger" onClick={() => setShowSyncModal(false)}>
+                Close
+              </button>
+            </div>
+
+            <div style={styles.syncModalBody}>
+              <div style={styles.targetInfo}>
+                <span style={{ color: 'var(--text-muted)' }}>Target Storage Path: </span>
+                <span className="mono" style={{ color: 'var(--accent-cyan)' }}>
+                  {syncTargetPath}
+                </span>
+              </div>
+
+              {syncStatus === 'success' && (
+                <div style={styles.successBanner}>
+                  ✓ Enhanced LRC successfully uploaded to the <strong>releaseready</strong> bucket!
+                </div>
+              )}
+
+              {syncStatus === 'error' && (
+                <div style={styles.errorBanner}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+                    ⚠️ Storage Authorization Required (Anon Write Failure)
+                  </div>
+                  <div style={{ fontSize: '0.85rem' }}>{syncErrorMessage}</div>
+                </div>
+              )}
+
+              <div style={styles.keySection}>
+                <label style={styles.label}>Supabase Write Key / Service Role Key (Optional)</label>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                  <input
+                    type="password"
+                    className="input mono"
+                    placeholder="Paste Supabase Service Key..."
+                    value={customKeyInput}
+                    onChange={(e) => setCustomKeyInput(e.target.value)}
+                    style={{ flexGrow: 1 }}
+                  />
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleSaveKeyAndRetry}
+                    disabled={isSyncing}
+                  >
+                    {isSyncing ? 'Saving...' : 'Save & Retry Sync'}
+                  </button>
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  Key will be securely stored in your local browser storage for future sync requests.
+                </div>
+              </div>
+
+              <div style={styles.fallbackSection}>
+                <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-secondary)' }}>
+                  One-Click Offline Options:
+                </span>
+                <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                  <button className="btn" onClick={handleCopyToClipboard}>
+                    📋 Copy LRC Content
+                  </button>
+                  <button className="btn btn-primary" onClick={onDownload}>
+                    📥 Download .lrc File
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -392,5 +514,51 @@ const styles = {
     whiteSpace: 'pre-wrap' as const,
     color: 'var(--text-primary)',
     lineHeight: '1.6',
+  },
+  syncModalBody: {
+    padding: '20px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '16px',
+  },
+  targetInfo: {
+    fontSize: '0.85rem',
+    backgroundColor: 'var(--bg-tertiary)',
+    padding: '10px 14px',
+    borderRadius: '6px',
+    border: '1px solid var(--border-color)',
+  },
+  successBanner: {
+    backgroundColor: 'rgba(57, 255, 20, 0.1)',
+    border: '1px solid var(--accent-green)',
+    color: 'var(--accent-green)',
+    padding: '12px',
+    borderRadius: '6px',
+    fontSize: '0.85rem',
+  },
+  errorBanner: {
+    backgroundColor: 'rgba(255, 51, 102, 0.1)',
+    border: '1px solid var(--accent-red)',
+    color: 'var(--accent-red)',
+    padding: '12px',
+    borderRadius: '6px',
+  },
+  keySection: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '4px',
+    marginTop: '6px',
+  },
+  label: {
+    fontSize: '0.8rem',
+    fontWeight: 'bold' as const,
+    color: 'var(--text-secondary)',
+  },
+  fallbackSection: {
+    borderTop: '1px solid var(--border-color)',
+    paddingTop: '14px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '8px',
   },
 };

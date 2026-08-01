@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import type { Line, Word } from '../types/lyric';
 import { formatTimestamp, parseTimestampToMs } from '../utils/formatter';
 
@@ -9,9 +9,11 @@ interface TimelineProps {
   activeWordIndex: number;
   onSeek: (ms: number) => void;
   onNudge: (lineIndex: number, wordIndex: number, deltaMs: number) => void;
-  onClear: (lineIndex: number, wordIndex: number) => void;
   onSetTimestamp: (lineIndex: number, wordIndex: number, ms: number | null) => void;
   onSelectWord: (lineIndex: number, wordIndex: number) => void;
+  onEditWordText: (lineIndex: number, wordIndex: number, text: string) => void;
+  onAddWord: (lineIndex: number, afterWordIndex?: number) => void;
+  onDeleteWord: (lineIndex: number, wordIndex: number) => void;
 }
 
 interface SyncedWordInfo {
@@ -27,11 +29,15 @@ export function Timeline({
   activeWordIndex,
   onSeek,
   onNudge,
-  onClear,
   onSetTimestamp,
   onSelectWord,
+  onEditWordText,
+  onAddWord,
+  onDeleteWord,
 }: TimelineProps) {
   const listRef = useRef<HTMLDivElement>(null);
+  const [editingWordId, setEditingWordId] = useState<string | null>(null);
+  const [editText, setEditText] = useState<string>('');
 
   // Flatten lines into a list of synced words
   const syncedWords: SyncedWordInfo[] = [];
@@ -51,8 +57,7 @@ export function Timeline({
   syncedWords.sort((a, b) => (a.word.timestamp || 0) - (b.word.timestamp || 0));
 
   // Determine active item to scroll to
-  const activeWordId =
-    lines[activeLineIndex]?.words?.[activeWordIndex]?.id;
+  const activeWordId = lines[activeLineIndex]?.words?.[activeWordIndex]?.id;
 
   // Scroll to follow playhead or cursor
   useEffect(() => {
@@ -63,14 +68,17 @@ export function Timeline({
     }
   }, [activeWordId]);
 
-  const handleTimestampChange = (
-    lineIdx: number,
-    wordIdx: number,
-    value: string
-  ) => {
+  const handleTimestampChange = (lineIdx: number, wordIdx: number, value: string) => {
     const ms = parseTimestampToMs(value);
     if (ms !== null) {
       onSetTimestamp(lineIdx, wordIdx, ms);
+    }
+  };
+
+  const handleSaveText = (lineIdx: number, wordIdx: number) => {
+    if (editingWordId) {
+      onEditWordText(lineIdx, wordIdx, editText.trim() || 'word');
+      setEditingWordId(null);
     }
   };
 
@@ -86,7 +94,7 @@ export function Timeline({
       <div ref={listRef} style={styles.list}>
         {syncedWords.length === 0 ? (
           <div style={styles.empty}>
-            No synced words yet. Start tapping spacebar to synchronize.
+            No synced words yet. Start tapping spacebar to synchronize or edit text.
           </div>
         ) : (
           syncedWords.map(({ word, lineIndex, wordIndex }) => {
@@ -100,6 +108,7 @@ export function Timeline({
                   idx > syncedWords.findIndex((w) => w.word.id === word.id) &&
                   (next.word.timestamp || 0) > (word.timestamp || 0)
               )?.word.timestamp || Infinity) > currentTime;
+            const isEditing = editingWordId === word.id;
 
             return (
               <div
@@ -112,17 +121,14 @@ export function Timeline({
                 }}
               >
                 {/* Click to Seek / playhead indicator */}
-                <div
-                  style={styles.seekZone}
-                  onClick={() => onSeek(word.timestamp || 0)}
-                >
+                <div style={styles.seekZone} onClick={() => onSeek(word.timestamp || 0)}>
                   <div
                     style={{
                       ...styles.bullet,
                       ...(isCurrentlyPlaying ? styles.bulletPlaying : {}),
                     }}
                   />
-                  
+
                   {/* Timestamp Input */}
                   <input
                     type="text"
@@ -140,19 +146,40 @@ export function Timeline({
                   />
                 </div>
 
-                {/* Word content */}
-                <div
-                  style={{
-                    ...styles.wordText,
-                    ...(isCursorActive ? { color: 'var(--accent-cyan)' } : {}),
-                    ...(isCurrentlyPlaying ? { fontWeight: 'bold' } : {}),
-                  }}
-                  onClick={() => onSelectWord(lineIndex, wordIndex)}
-                >
-                  {word.text}
-                </div>
+                {/* Word content / Inline Editor */}
+                {isEditing ? (
+                  <input
+                    type="text"
+                    className="input mono"
+                    style={styles.textInputInline}
+                    value={editText}
+                    autoFocus
+                    onChange={(e) => setEditText(e.target.value)}
+                    onBlur={() => handleSaveText(lineIndex, wordIndex)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSaveText(lineIndex, wordIndex);
+                      if (e.key === 'Escape') setEditingWordId(null);
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      ...styles.wordText,
+                      ...(isCursorActive ? { color: 'var(--accent-cyan)' } : {}),
+                      ...(isCurrentlyPlaying ? { fontWeight: 'bold' } : {}),
+                    }}
+                    onClick={() => onSelectWord(lineIndex, wordIndex)}
+                    onDoubleClick={() => {
+                      setEditingWordId(word.id);
+                      setEditText(word.text);
+                    }}
+                    title="Click to select. Double-click to edit word text."
+                  >
+                    {word.text}
+                  </div>
+                )}
 
-                {/* Nudge controls */}
+                {/* Nudge controls and Actions */}
                 <div style={styles.nudgers}>
                   <button
                     style={styles.nudgeBtn}
@@ -183,9 +210,16 @@ export function Timeline({
                     +100
                   </button>
                   <button
+                    style={styles.nudgeBtn}
+                    onClick={() => onAddWord(lineIndex, wordIndex)}
+                    title="Insert word after this"
+                  >
+                    +
+                  </button>
+                  <button
                     style={{ ...styles.nudgeBtn, ...styles.clearBtn }}
-                    onClick={() => onClear(lineIndex, wordIndex)}
-                    title="Clear Timestamp"
+                    onClick={() => onDeleteWord(lineIndex, wordIndex)}
+                    title="Delete word"
                   >
                     ×
                   </button>
@@ -201,7 +235,7 @@ export function Timeline({
 
 const styles = {
   container: {
-    width: '380px',
+    width: '420px',
     backgroundColor: 'var(--bg-secondary)',
     borderRight: '1px solid var(--border-color)',
     display: 'flex',
@@ -244,9 +278,9 @@ const styles = {
   row: {
     display: 'flex',
     alignItems: 'center',
-    padding: '6px 12px',
+    padding: '6px 10px',
     borderBottom: '1px solid rgba(46, 46, 58, 0.3)',
-    gap: '12px',
+    gap: '8px',
     transition: 'background-color 0.1s ease',
   },
   rowActive: {
@@ -259,7 +293,7 @@ const styles = {
   seekZone: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: '6px',
     cursor: 'pointer',
   },
   bullet: {
@@ -273,10 +307,16 @@ const styles = {
     boxShadow: '0 0 6px var(--accent-green)',
   },
   timeInput: {
-    width: '75px',
-    padding: '3px 6px',
+    width: '72px',
+    padding: '2px 4px',
     fontSize: '0.75rem',
     textAlign: 'center' as const,
+  },
+  textInputInline: {
+    flexGrow: 1,
+    fontSize: '0.85rem',
+    padding: '2px 6px',
+    color: 'var(--accent-cyan)',
   },
   wordText: {
     flexGrow: 1,
@@ -298,7 +338,7 @@ const styles = {
     border: '1px solid var(--border-color)',
     color: 'var(--text-secondary)',
     fontSize: '0.65rem',
-    padding: '3px 5px',
+    padding: '2px 4px',
     cursor: 'pointer',
     borderRadius: '2px',
     fontFamily: 'var(--font-mono)',
@@ -307,6 +347,6 @@ const styles = {
     color: 'var(--accent-red)',
     fontWeight: 'bold' as const,
     fontSize: '0.8rem',
-    padding: '1px 5px',
+    padding: '0 5px',
   },
 };
