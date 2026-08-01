@@ -33,7 +33,7 @@ const STORAGE_BASE = 'https://pznmptudgicrmljjafex.supabase.co/storage/v1/object
 // Helper to fetch assets locally, falling back to the Supabase storage bucket if needed
 async function fetchAssetWithFallback(assetName: string) {
   try {
-    const localRes = await fetch(`/${assetName}`);
+    const localRes = await fetch(`/${assetName}?t=${Date.now()}`);
     if (localRes.ok) {
       return await localRes.json();
     }
@@ -42,7 +42,7 @@ async function fetchAssetWithFallback(assetName: string) {
   }
 
   // Remote fallback
-  const remoteRes = await fetch(`${STORAGE_BASE}/${assetName}`);
+  const remoteRes = await fetch(`${STORAGE_BASE}/${assetName}?t=${Date.now()}`);
   if (remoteRes.ok) {
     console.log(`Successfully fetched ${assetName} from Supabase storage bucket.`);
     return await remoteRes.json();
@@ -60,10 +60,12 @@ export function Toolbar({
   onImportSyncedLines,
 }: ToolbarProps) {
   const [manifest, setManifest] = useState<ManifestItem[]>([]);
+  const [selectedSong, setSelectedSong] = useState<ManifestItem | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isReloading, setIsReloading] = useState(false);
 
   // Sync Modal State
   const [showSyncModal, setShowSyncModal] = useState(false);
@@ -75,14 +77,19 @@ export function Toolbar({
   );
 
   // Load manifest on mount
+  const loadManifest = async () => {
+    try {
+      const data = await fetchAssetWithFallback('release-manifest.json');
+      if (data.items) {
+        setManifest(data.items);
+      }
+    } catch (err) {
+      console.error('Failed to load release manifest:', err);
+    }
+  };
+
   useEffect(() => {
-    fetchAssetWithFallback('release-manifest.json')
-      .then((data) => {
-        if (data.items) {
-          setManifest(data.items);
-        }
-      })
-      .catch((err) => console.error('Failed to load release manifest:', err));
+    loadManifest();
   }, []);
 
   // Filtered items based on search query
@@ -93,6 +100,8 @@ export function Toolbar({
     : [];
 
   const handleSelectSong = async (song: ManifestItem) => {
+    setSelectedSong(song);
+
     // 1. Set metadata
     setMetadata({
       title: song.storageTitle,
@@ -144,6 +153,25 @@ export function Toolbar({
     setAudioUrl(audioUrl);
     setSearchQuery(song.storageTitle);
     setShowDropdown(false);
+  };
+
+  // Reload / Refresh active song & manifest
+  const handleReload = async () => {
+    setIsReloading(true);
+    await loadManifest();
+
+    if (selectedSong) {
+      await handleSelectSong(selectedSong);
+    } else if (doc.metadata.title) {
+      // Look up current title in manifest if available
+      const matched = manifest.find(
+        (s) => s.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
+      );
+      if (matched) {
+        await handleSelectSong(matched);
+      }
+    }
+    setIsReloading(false);
   };
 
   const handleLocalFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -295,6 +323,34 @@ export function Toolbar({
           )}
         </div>
 
+        {/* Reload / Refresh Button */}
+        <button
+          className="btn"
+          onClick={handleReload}
+          disabled={isReloading}
+          title="Refresh database catalog and reload active song data"
+          style={styles.reloadBtn}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              animation: isReloading ? 'spin 1s linear infinite' : 'none',
+            }}
+          >
+            <polyline points="23 4 23 10 17 10" />
+            <polyline points="1 20 1 14 7 14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+          <span>{isReloading ? 'Reloading...' : 'Reload'}</span>
+        </button>
+
         {/* Local File Picker */}
         <label className="btn">
           <span>Upload Audio File</span>
@@ -443,7 +499,7 @@ const styles = {
   left: {
     display: 'flex',
     alignItems: 'center',
-    gap: '15px',
+    gap: '12px',
   },
   logo: {
     fontSize: '1.1rem',
@@ -453,6 +509,12 @@ const styles = {
     letterSpacing: '1px',
     color: 'var(--accent-cyan)',
     marginRight: '10px',
+  },
+  reloadBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '0.8rem',
   },
   right: {
     display: 'flex',
