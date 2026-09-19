@@ -28,7 +28,10 @@ interface ToolbarProps {
   onImportSyncedLines: (lines: any[]) => void;
 }
 
-const STORAGE_BASE = 'https://pznmptudgicrmljjafex.supabase.co/storage/v1/object/public/releaseready';
+const STORAGE_BASE =
+  import.meta.env.VITE_STORAGE_BASE_URL ||
+  import.meta.env.VITE_R2_URL ||
+  'https://files.th3scr1b3.art';
 
 // Helper to fetch assets locally, falling back to the Supabase storage bucket if needed
 async function fetchAssetWithFallback(assetName: string) {
