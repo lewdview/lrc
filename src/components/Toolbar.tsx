@@ -8,6 +8,7 @@ import {
   setStoredSupabaseKey,
   SUPABASE_ANON_KEY,
 } from '../services/supabaseClient';
+import dayFileMap from '../data/day_file_map.json';
 
 interface ManifestItem {
   month: string;
@@ -146,12 +147,32 @@ export function Toolbar({
       setLyricsRaw('// Error loading lyrics database. Paste your lyrics here.');
     }
 
-    // 3. Resolve audio storage URL
+    // 3. Resolve audio storage URL from verified dayFileMap on Cloudflare R2
     const paddedDay = String(song.index).padStart(2, '0');
-    const fileName = `${paddedDay} - ${song.storageTitle}.${song.ext}`;
-    const audioUrl = `${STORAGE_BASE}/audio/${song.month.toLowerCase()}/${encodeURIComponent(
-      fileName
-    )}`;
+    const songMonth = song.month.toLowerCase();
+    const mapEntries = Object.values(dayFileMap as Record<string, any>);
+    const mapped =
+      (dayFileMap as Record<string, any>)[String(song.index)] ||
+      (dayFileMap as Record<string, any>)[String(paddedDay)] ||
+      mapEntries.find(
+        (m: any) =>
+          m.month?.toLowerCase() === songMonth &&
+          (m.dayOfMonth === song.index || m.day === song.index)
+      ) ||
+      mapEntries.find(
+        (m: any) =>
+          m.month?.toLowerCase() === songMonth &&
+          m.audio?.toLowerCase().includes(song.storageTitle.toLowerCase())
+      );
+
+    let audioUrl: string;
+    if (mapped && mapped.audio) {
+      audioUrl = `${STORAGE_BASE}/${mapped.audio}`;
+    } else {
+      // Default to .mp3 on Cloudflare R2 CDN
+      const fileName = `${paddedDay} - ${song.storageTitle}.mp3`;
+      audioUrl = `${STORAGE_BASE}/audio/${songMonth}/${encodeURIComponent(fileName)}`;
+    }
 
     setAudioUrl(audioUrl);
     setSearchQuery(song.storageTitle);
@@ -259,7 +280,31 @@ export function Toolbar({
       const activeClient = getSupabaseClient(keyOverride);
       const fileBlob = new Blob([formattedLrc], { type: 'text/plain;charset=utf-8' });
 
-      // Primary upload attempt
+      // 1. Also update the lyrics in the database releases table
+      let dbUpdated = false;
+      try {
+        const { error: dbError } = await activeClient
+          .from('releases')
+          .update({
+            lyrics: formattedLrc,
+          })
+          .ilike('title', `%${cleanTitle}%`);
+        if (!dbError) {
+          dbUpdated = true;
+          console.log(`Lyrics successfully synced to releases table for "${cleanTitle}".`);
+        }
+      } catch (dbErr) {
+        console.warn('Database releases lyrics update notice:', dbErr);
+      }
+
+      // 2. If a custom write key was provided, ensure bucket exists
+      if (keyOverride && keyOverride.trim()) {
+        try {
+          await activeClient.storage.createBucket('releaseready', { public: true });
+        } catch (_) {}
+      }
+
+      // 3. Storage upload attempt
       let { error } = await activeClient.storage
         .from('releaseready')
         .upload(storagePath, fileBlob, {
@@ -268,8 +313,12 @@ export function Toolbar({
           contentType: 'text/plain;charset=utf-8',
         });
 
-      // Encoded path fallback retry if 400
-      if (error && (error as any).statusCode === 400) {
+      // Encoded path fallback retry if 400 (except when bucket itself is missing)
+      if (
+        error &&
+        (error as any).statusCode === 400 &&
+        !(error as any).message?.toLowerCase().includes('bucket not found')
+      ) {
         const encodedPath = `lyrics/${monthPath}/${encodeURIComponent(fileName)}`;
         const retryRes = await activeClient.storage
           .from('releaseready')
@@ -283,7 +332,31 @@ export function Toolbar({
         }
       }
 
-      if (error) throw error;
+      if (error) {
+        // If storage upload failed but database updated, treat as partial success with guidance
+        const isBucketNotFound =
+          (error as any)?.message?.toLowerCase().includes('bucket not found') ||
+          (error as any)?.statusCode === '400' ||
+          (error as any)?.statusCode === 400;
+        const isRlsError =
+          (error as any)?.message?.includes('row-level security') ||
+          (error as any)?.statusCode === '403' ||
+          (error as any)?.statusCode === 403 ||
+          (error as any)?.error === 'Unauthorized' ||
+          (error as any)?.message?.includes('violates row-level security');
+
+        setSyncStatus(dbUpdated ? 'success' : 'error');
+        setSyncErrorMessage(
+          isBucketNotFound
+            ? 'Storage bucket "releaseready" is not hosted on Supabase (media is on Cloudflare R2 at files.th3scr1b3.art).' +
+              (dbUpdated ? ' Lyrics saved to database releases table! You can also download or copy the .lrc file below.' : ' Please download or copy the .lrc file below.')
+            : isRlsError
+            ? 'Storage Row-Level Security (RLS) Restriction: Anonymous write operations are blocked on the releaseready bucket. Please enter a Supabase Service Role Key below or download/copy your LRC file.'
+            : error.message || 'Storage upload failed. Please verify storage permissions or use direct download.'
+        );
+        setShowSyncModal(true);
+        return;
+      }
 
       setSyncStatus('success');
       setShowSyncModal(true);

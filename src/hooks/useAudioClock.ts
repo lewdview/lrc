@@ -44,12 +44,27 @@ export function useAudioClock(): UseAudioClock {
       setIsPlaying(false);
       setCurrentTime(audio.duration * 1000 || 0);
     };
+    const handleError = () => {
+      const currentSrc = audio.src || '';
+      if (currentSrc.includes('.wav')) {
+        const fallback = currentSrc.replace(/\.wav(\?.*)?$/i, '.mp3$1');
+        console.warn(`Audio .wav failed to load, attempting .mp3 fallback: ${fallback}`);
+        audio.src = fallback;
+        audio.load();
+      } else if (currentSrc.includes('.mp3') && !currentSrc.includes('_wav_fallback')) {
+        const fallback = currentSrc.replace(/\.mp3(\?.*)?$/i, '.wav$1');
+        console.warn(`Audio .mp3 failed to load, attempting .wav fallback: ${fallback}`);
+        audio.src = fallback;
+        audio.load();
+      }
+    };
 
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('durationchange', handleDurationChange);
     audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
 
     return () => {
       audio.pause();
@@ -58,6 +73,7 @@ export function useAudioClock(): UseAudioClock {
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('durationchange', handleDurationChange);
       audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, []);
@@ -114,9 +130,16 @@ export function useAudioClock(): UseAudioClock {
   // Actions
   const play = useCallback(() => {
     if (audioRef.current && audioUrl) {
-      audioRef.current.play().catch((err) => {
-        console.error('Playback error:', err);
-      });
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          if (err.name === 'NotSupportedError') {
+            console.warn('Playback error: Audio format not supported or media is still loading:', err);
+          } else {
+            console.error('Playback error:', err);
+          }
+        });
+      }
     }
   }, [audioUrl]);
 
