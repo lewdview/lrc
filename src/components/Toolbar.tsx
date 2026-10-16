@@ -17,6 +17,15 @@ interface ManifestItem {
   coverPath: string;
 }
 
+interface ReleaseEntry {
+  title?: string;
+  storageTitle?: string;
+  manifestAudioPath?: string;
+  lyrics?: string;
+  lyricsSegments?: Parameters<typeof reconstructLinesFromAnalysis>[0];
+  lyricsWords?: Parameters<typeof reconstructLinesFromAnalysis>[1];
+}
+
 interface DayFileEntry {
   month?: string;
   day?: number;
@@ -73,6 +82,19 @@ function resolveAudioUrl(song: ManifestItem): string {
   return `${STORAGE_BASE}/audio/${songMonth}/${encodeURIComponent(fileName)}`;
 }
 
+const same = (a?: string, b?: string) => !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+// The catalog names files by storageTitle, which often differs from the release's display
+// title ("Ss Take One" vs "Silent Suffocation"), so match on the storage fields first.
+function findRelease(releases: ReleaseEntry[] | undefined, song: ManifestItem): ReleaseEntry | undefined {
+  if (!releases) return undefined;
+  return (
+    releases.find((r) => same(r.storageTitle, song.storageTitle)) ||
+    releases.find((r) => same(r.manifestAudioPath, song.audioPath)) ||
+    releases.find((r) => same(r.title, song.storageTitle))
+  );
+}
+
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export function Toolbar({
@@ -87,6 +109,7 @@ export function Toolbar({
 }: ToolbarProps) {
   const [manifest, setManifest] = useState<ManifestItem[]>([]);
   const [selectedSong, setSelectedSong] = useState<ManifestItem | null>(null);
+  const [releaseTitle, setReleaseTitle] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
@@ -115,11 +138,16 @@ export function Toolbar({
     ? manifest.filter((item) => item.storageTitle.toLowerCase().includes(query)).slice(0, 60)
     : [];
 
-  const matchedSong = manifest.find(
-    (item) => item.storageTitle.toLowerCase() === doc.metadata.title.trim().toLowerCase()
-  );
+  // The catalog song this document belongs to, if its title still matches the one picked.
+  const docTitle = doc.metadata.title;
+  const matchedSong =
+    selectedSong && (same(docTitle, selectedSong.storageTitle) || same(docTitle, releaseTitle ?? undefined))
+      ? selectedSong
+      : manifest.find((item) => same(item.storageTitle, docTitle));
   const publishTarget = {
-    title: doc.metadata.title,
+    title: docTitle,
+    fileTitle: matchedSong?.storageTitle,
+    releaseTitles: [releaseTitle && matchedSong === selectedSong ? releaseTitle : '', docTitle, matchedSong?.storageTitle ?? ''],
     album: doc.metadata.album,
     dayOfMonth: matchedSong?.index,
   };
@@ -131,20 +159,17 @@ export function Toolbar({
 
   const handleSelectSong = async (song: ManifestItem) => {
     setSelectedSong(song);
-    setMetadata({
-      title: song.storageTitle,
-      artist: 'th3scr1b3',
-      album: `${capitalize(song.month)} Releases`,
-      by: 'th3scr1b3 LRC Tool',
-      offset: 0,
-    });
+    setReleaseTitle(null);
+    let title = song.storageTitle;
 
     // Lyrics: word timings from the release data when present, else the plain-text fallback.
     try {
       const releaseData = await fetchAssetWithFallback('release-data.json');
-      const matchedRelease = releaseData.releases?.find(
-        (r: { title?: string }) => r.title?.toLowerCase() === song.storageTitle.toLowerCase()
-      );
+      const matchedRelease = findRelease(releaseData.releases, song);
+      if (matchedRelease?.title) {
+        title = matchedRelease.title;
+        setReleaseTitle(matchedRelease.title);
+      }
 
       if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
         onImportSyncedLines(
@@ -163,6 +188,14 @@ export function Toolbar({
       setLyricsRaw('// Error loading lyrics database. Paste your lyrics here.');
     }
 
+    setMetadata({
+      title,
+      artist: 'th3scr1b3',
+      album: `${capitalize(song.month)} Releases`,
+      by: 'th3scr1b3 LRC Tool',
+      offset: 0,
+    });
+
     setAudioUrl(resolveAudioUrl(song));
     setSearchQuery(song.storageTitle);
     setShowDropdown(false);
@@ -172,8 +205,7 @@ export function Toolbar({
     setIsReloading(true);
     await loadManifest();
     const song =
-      selectedSong ||
-      manifest.find((s) => s.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase());
+      selectedSong || manifest.find((s) => same(s.storageTitle, doc.metadata.title));
     if (song) await handleSelectSong(song);
     setIsReloading(false);
   };

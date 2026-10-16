@@ -7,6 +7,10 @@ const MONTHS = [
 
 export interface PublishTarget {
   title: string;
+  /** Catalog storage title used for file names; defaults to the title. */
+  fileTitle?: string;
+  /** Titles to look the release row up by, most specific first (display title before storage title). */
+  releaseTitles?: string[];
   /** Album text such as "March Releases"; the month is read out of it. */
   album?: string;
   /** Day of the month from the release manifest, when the song came from the catalog. */
@@ -25,7 +29,7 @@ export function storagePathFor(target: PublishTarget): string {
   const album = (target.album || '').toLowerCase();
   const month = MONTHS.find((m) => album.includes(m)) || 'january';
   const day = String(target.dayOfMonth ?? 1).padStart(2, '0');
-  return `lyrics/${month}/${day} - ${target.title.trim()}.lrc`;
+  return `lyrics/${month}/${day} - ${(target.fileTitle || target.title).trim()}.lrc`;
 }
 
 // ilike without wildcards is a case-insensitive exact match once % and _ are escaped.
@@ -55,23 +59,35 @@ export async function publishLRC(target: PublishTarget, lrc: string): Promise<Pu
   const storagePath = storagePathFor(target);
   const result: PublishResult = { storagePath, storageOk: false, dbUpdated: false };
 
-  // 1. The release row: only an exact (case-insensitive) title match, and only if it is unique.
-  const { data: rows, error: findError } = await supabase
-    .from('releases')
-    .select('id')
-    .ilike('title', exactIlike(title))
-    .limit(2);
-  if (findError) {
-    result.dbNote = `Could not look up the release: ${findError.message}`;
-  } else if (!rows || rows.length === 0) {
-    result.dbNote = `No release titled "${title}" in the database.`;
-  } else if (rows.length > 1) {
-    result.dbNote = `More than one release is titled "${title}", so none was changed.`;
+  // 1. The release row: the first candidate title with exactly one (case-insensitive) match.
+  const candidates = [...new Set([...(target.releaseTitles ?? []), title].map((t) => t.trim()).filter(Boolean))];
+  let releaseId: string | number | null = null;
+  for (const candidate of candidates) {
+    const { data: rows, error: findError } = await supabase
+      .from('releases')
+      .select('id')
+      .ilike('title', exactIlike(candidate))
+      .limit(2);
+    if (findError) {
+      result.dbNote = `Could not look up the release: ${findError.message}`;
+      break;
+    }
+    if (rows && rows.length === 1) {
+      releaseId = rows[0].id;
+      break;
+    }
+    if (rows && rows.length > 1) {
+      result.dbNote = `More than one release is titled "${candidate}", so none was changed.`;
+      break;
+    }
+  }
+  if (releaseId === null) {
+    result.dbNote ??= `No release titled ${candidates.map((c) => `"${c}"`).join(' or ')} in the database.`;
   } else {
     const { data: updated, error: updateError } = await supabase
       .from('releases')
       .update({ lyrics: lrc })
-      .eq('id', rows[0].id)
+      .eq('id', releaseId)
       .select('id');
     if (updateError) result.dbNote = `Release update failed: ${updateError.message}`;
     else if (!updated || updated.length === 0) result.dbNote = 'Your account is not allowed to update releases.';
