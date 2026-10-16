@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import type { Line, LyricsDocument } from '../types/lyric';
 import { formatEnhancedLRC } from '../utils/exportLRC';
 import { reconstructLinesFromAnalysis } from '../utils/parser';
-import { publishLRC, storagePathFor, type PublishResult } from '../services/publish';
+import { fetchPublishedTiming, publishLRC, storagePathFor, type PublishResult } from '../services/publish';
+import { dayOfYear, linesToTimings, timingsToLines } from '../utils/timings';
 import { signInUrl, type Account } from '../hooks/useAccount';
 import { AccountChip } from './AccountChip';
 import { Modal } from './Modal';
@@ -147,9 +148,9 @@ export function Toolbar({
   const publishTarget = {
     title: docTitle,
     fileTitle: matchedSong?.storageTitle,
-    releaseTitles: [releaseTitle && matchedSong === selectedSong ? releaseTitle : '', docTitle, matchedSong?.storageTitle ?? ''],
     album: doc.metadata.album,
     dayOfMonth: matchedSong?.index,
+    day: matchedSong ? dayOfYear(matchedSong.month, matchedSong.index) ?? undefined : undefined,
   };
 
   const unsyncedWords = doc.lines.reduce(
@@ -162,16 +163,24 @@ export function Toolbar({
     setReleaseTitle(null);
     let title = song.storageTitle;
 
-    // Lyrics: word timings from the release data when present, else the plain-text fallback.
+    // Lyrics: timings already published from here first, then the release data's word
+    // timings, then the plain-text fallback.
     try {
-      const releaseData = await fetchAssetWithFallback('release-data.json');
+      const day = dayOfYear(song.month, song.index);
+      const [releaseData, published] = await Promise.all([
+        fetchAssetWithFallback('release-data.json'),
+        day ? fetchPublishedTiming(day) : Promise.resolve(null),
+      ]);
       const matchedRelease = findRelease(releaseData.releases, song);
       if (matchedRelease?.title) {
         title = matchedRelease.title;
         setReleaseTitle(matchedRelease.title);
       }
 
-      if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
+      if (published) {
+        onImportSyncedLines(timingsToLines(published));
+        setLyricsRaw(published.lyrics);
+      } else if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
         onImportSyncedLines(
           reconstructLinesFromAnalysis(matchedRelease.lyricsSegments, matchedRelease.lyricsWords)
         );
@@ -240,13 +249,15 @@ export function Toolbar({
     setIsPublishing(true);
     setPublishResult(null);
     try {
-      setPublishResult(await publishLRC(publishTarget, formatEnhancedLRC(doc)));
+      setPublishResult(
+        await publishLRC(publishTarget, formatEnhancedLRC(doc), linesToTimings(doc.lines, doc.metadata.offset))
+      );
     } catch (err) {
       setPublishResult({
         storagePath: storagePathFor(publishTarget),
         storageOk: false,
         storageError: err instanceof Error ? err.message : 'Publish failed.',
-        dbUpdated: false,
+        timingsSaved: false,
       });
     } finally {
       setIsPublishing(false);
@@ -383,11 +394,14 @@ export function Toolbar({
       {showPublish && (
         <Modal title="Publish to the vault" onClose={() => setShowPublish(false)}>
           <p className="modal-note">
-            Uploads this enhanced LRC to the <code>releaseready</code> bucket and writes it to the
-            matching release in the database, as your signed-in account.
+            Saves the word timings for this day so the main site&rsquo;s karaoke view follows them
+            (the lyrics shown there stay plain text), and uploads the enhanced .lrc to the{' '}
+            <code>releaseready</code> bucket. Both happen as your signed-in account.
           </p>
           <div className="modal-target">
-            <span className="kicker">Target</span>
+            <span className="kicker">Day</span>
+            <code>{publishTarget.day ?? 'not a catalog song'}</code>
+            <span className="kicker">File</span>
             <code>{storagePathFor(publishTarget)}</code>
           </div>
 
@@ -401,7 +415,7 @@ export function Toolbar({
           {unsyncedWords > 0 && (
             <div className="banner banner-warn">
               <strong>{unsyncedWords} words not synced</strong>
-              They export with the previous word's time (or 00:00 on an unsynced line).
+              The karaoke view skips them; in the .lrc they take the previous word's time (or 00:00 on an unsynced line).
             </div>
           )}
 
@@ -411,9 +425,11 @@ export function Toolbar({
                 <strong>File {publishResult.storageOk ? 'uploaded' : 'not uploaded'}</strong>
                 {publishResult.storageOk ? publishResult.storagePath : publishResult.storageError}
               </div>
-              <div className={`banner ${publishResult.dbUpdated ? 'banner-ok' : 'banner-warn'}`}>
-                <strong>Release {publishResult.dbUpdated ? 'updated' : 'not updated'}</strong>
-                {publishResult.dbUpdated ? `Lyrics saved on "${doc.metadata.title.trim()}".` : publishResult.dbNote}
+              <div className={`banner ${publishResult.timingsSaved ? 'banner-ok' : 'banner-err'}`}>
+                <strong>Karaoke timings {publishResult.timingsSaved ? 'saved' : 'not saved'}</strong>
+                {publishResult.timingsSaved
+                  ? `Day ${publishTarget.day} now follows these timings on th3scr1b3.art.`
+                  : publishResult.timingsNote}
               </div>
             </>
           )}

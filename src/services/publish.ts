@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import type { Timings } from '../utils/timings';
 
 const MONTHS = [
   'january', 'february', 'march', 'april', 'may', 'june',
@@ -6,23 +7,24 @@ const MONTHS = [
 ];
 
 export interface PublishTarget {
+  /** Display title (as on the main site). */
   title: string;
   /** Catalog storage title used for file names; defaults to the title. */
   fileTitle?: string;
-  /** Titles to look the release row up by, most specific first (display title before storage title). */
-  releaseTitles?: string[];
   /** Album text such as "March Releases"; the month is read out of it. */
   album?: string;
   /** Day of the month from the release manifest, when the song came from the catalog. */
   dayOfMonth?: number;
+  /** Day of the 365 project, when the song came from the catalog. */
+  day?: number;
 }
 
 export interface PublishResult {
   storagePath: string;
   storageOk: boolean;
   storageError?: string;
-  dbUpdated: boolean;
-  dbNote?: string;
+  timingsSaved: boolean;
+  timingsNote?: string;
 }
 
 export function storagePathFor(target: PublishTarget): string {
@@ -31,9 +33,6 @@ export function storagePathFor(target: PublishTarget): string {
   const day = String(target.dayOfMonth ?? 1).padStart(2, '0');
   return `lyrics/${month}/${day} - ${(target.fileTitle || target.title).trim()}.lrc`;
 }
-
-// ilike without wildcards is a case-insensitive exact match once % and _ are escaped.
-const exactIlike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 type StorageError = { message?: string; statusCode?: string | number; error?: string };
 
@@ -49,49 +48,54 @@ function describeStorageError(err: StorageError): string {
   return msg || 'Storage upload failed.';
 }
 
-/**
- * Publish an enhanced LRC to the vault as the signed-in user: the .lrc goes to the
- * releaseready bucket and the matching release row's lyrics are updated. Row-level security
- * decides what the account may write; nothing here uses a privileged key.
- */
-export async function publishLRC(target: PublishTarget, lrc: string): Promise<PublishResult> {
-  const title = target.title.trim();
-  const storagePath = storagePathFor(target);
-  const result: PublishResult = { storagePath, storageOk: false, dbUpdated: false };
+/** Timings published earlier for a release day, if any. */
+export async function fetchPublishedTiming(day: number): Promise<Timings | null> {
+  const { data, error } = await supabase
+    .from('lyric_timings')
+    .select('lyrics, words, segments')
+    .eq('day', day)
+    .maybeSingle();
+  if (error || !data || !Array.isArray(data.words) || data.words.length === 0) return null;
+  return {
+    lyrics: typeof data.lyrics === 'string' ? data.lyrics : '',
+    words: data.words,
+    segments: Array.isArray(data.segments) ? data.segments : [],
+  };
+}
 
-  // 1. The release row: the first candidate title with exactly one (case-insensitive) match.
-  const candidates = [...new Set([...(target.releaseTitles ?? []), title].map((t) => t.trim()).filter(Boolean))];
-  let releaseId: string | number | null = null;
-  for (const candidate of candidates) {
-    const { data: rows, error: findError } = await supabase
-      .from('releases')
-      .select('id')
-      .ilike('title', exactIlike(candidate))
-      .limit(2);
-    if (findError) {
-      result.dbNote = `Could not look up the release: ${findError.message}`;
-      break;
-    }
-    if (rows && rows.length === 1) {
-      releaseId = rows[0].id;
-      break;
-    }
-    if (rows && rows.length > 1) {
-      result.dbNote = `More than one release is titled "${candidate}", so none was changed.`;
-      break;
-    }
-  }
-  if (releaseId === null) {
-    result.dbNote ??= `No release titled ${candidates.map((c) => `"${c}"`).join(' or ')} in the database.`;
+/**
+ * Publish as the signed-in user. Word timings (and the plain lyrics) go to
+ * public.lyric_timings, which the main site's karaoke view reads; the enhanced .lrc goes to
+ * the releaseready bucket. Row-level security decides what the account may write; nothing
+ * here uses a privileged key.
+ */
+export async function publishLRC(target: PublishTarget, lrc: string, timings: Timings): Promise<PublishResult> {
+  const storagePath = storagePathFor(target);
+  const result: PublishResult = { storagePath, storageOk: false, timingsSaved: false };
+
+  // 1. Timings, keyed by release day.
+  if (!target.day) {
+    result.timingsNote = 'Pick the song from the 365 catalog so the timings know which day they belong to.';
+  } else if (timings.words.length === 0) {
+    result.timingsNote = 'No synced words yet.';
   } else {
-    const { data: updated, error: updateError } = await supabase
-      .from('releases')
-      .update({ lyrics: lrc })
-      .eq('id', releaseId)
-      .select('id');
-    if (updateError) result.dbNote = `Release update failed: ${updateError.message}`;
-    else if (!updated || updated.length === 0) result.dbNote = 'Your account is not allowed to update releases.';
-    else result.dbUpdated = true;
+    const { data, error } = await supabase
+      .from('lyric_timings')
+      .upsert(
+        {
+          day: target.day,
+          title: target.title.trim(),
+          storage_title: (target.fileTitle || target.title).trim(),
+          lyrics: timings.lyrics,
+          words: timings.words,
+          segments: timings.segments,
+        },
+        { onConflict: 'day' }
+      )
+      .select('day');
+    if (error) result.timingsNote = `Timings not saved: ${error.message}`;
+    else if (!data || data.length === 0) result.timingsNote = 'Your account is not allowed to save timings.';
+    else result.timingsSaved = true;
   }
 
   // 2. The .lrc file.
