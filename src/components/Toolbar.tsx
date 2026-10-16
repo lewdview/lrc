@@ -1,13 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import type { LyricsDocument } from '../types/lyric';
+import type { Line, LyricsDocument } from '../types/lyric';
 import { formatEnhancedLRC } from '../utils/exportLRC';
 import { reconstructLinesFromAnalysis } from '../utils/parser';
-import {
-  getSupabaseClient,
-  getStoredSupabaseKey,
-  setStoredSupabaseKey,
-  SUPABASE_ANON_KEY,
-} from '../services/supabaseClient';
+import { publishLRC, storagePathFor, type PublishResult } from '../services/publish';
+import { signInUrl, type Account } from '../hooks/useAccount';
+import { AccountChip } from './AccountChip';
+import { Modal } from './Modal';
 import dayFileMap from '../data/day_file_map.json';
 
 interface ManifestItem {
@@ -19,14 +17,22 @@ interface ManifestItem {
   coverPath: string;
 }
 
+interface DayFileEntry {
+  month?: string;
+  day?: number;
+  dayOfMonth?: number;
+  audio?: string;
+}
+
 interface ToolbarProps {
   document: LyricsDocument;
+  account: Account;
   setMetadata: (meta: LyricsDocument['metadata']) => void;
   setLyricsRaw: (text: string) => void;
   setAudioUrl: (url: string | null) => void;
   onDownload: () => void;
   onClear: () => void;
-  onImportSyncedLines: (lines: any[]) => void;
+  onImportSyncedLines: (lines: Line[]) => void;
 }
 
 const STORAGE_BASE =
@@ -34,28 +40,44 @@ const STORAGE_BASE =
   import.meta.env.VITE_R2_URL ||
   'https://files.th3scr1b3.art';
 
-// Helper to fetch assets locally, falling back to the Supabase storage bucket if needed
+// Fetch a catalog file from this deploy first, then from the release CDN.
 async function fetchAssetWithFallback(assetName: string) {
   try {
     const localRes = await fetch(`/${assetName}?t=${Date.now()}`);
-    if (localRes.ok) {
-      return await localRes.json();
-    }
+    if (localRes.ok) return await localRes.json();
   } catch (err) {
-    console.warn(`Local fetch for ${assetName} failed, trying Supabase storage...`, err);
+    console.warn(`Local fetch for ${assetName} failed, trying ${STORAGE_BASE}...`, err);
   }
-
-  // Remote fallback
   const remoteRes = await fetch(`${STORAGE_BASE}/${assetName}?t=${Date.now()}`);
-  if (remoteRes.ok) {
-    console.log(`Successfully fetched ${assetName} from Supabase storage bucket.`);
-    return await remoteRes.json();
-  }
+  if (remoteRes.ok) return await remoteRes.json();
   throw new Error(`Failed to fetch ${assetName} from both local and remote sources.`);
 }
 
+function resolveAudioUrl(song: ManifestItem): string {
+  const paddedDay = String(song.index).padStart(2, '0');
+  const songMonth = song.month.toLowerCase();
+  const map = dayFileMap as Record<string, DayFileEntry>;
+  const entries = Object.values(map);
+  const mapped =
+    map[String(song.index)] ||
+    map[paddedDay] ||
+    entries.find(
+      (m) => m.month?.toLowerCase() === songMonth && (m.dayOfMonth === song.index || m.day === song.index)
+    ) ||
+    entries.find(
+      (m) => m.month?.toLowerCase() === songMonth && m.audio?.toLowerCase().includes(song.storageTitle.toLowerCase())
+    );
+
+  if (mapped?.audio) return `${STORAGE_BASE}/${mapped.audio}`;
+  const fileName = `${paddedDay} - ${song.storageTitle}.mp3`;
+  return `${STORAGE_BASE}/audio/${songMonth}/${encodeURIComponent(fileName)}`;
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 export function Toolbar({
   document: doc,
+  account,
   setMetadata,
   setLyricsRaw,
   setAudioUrl,
@@ -68,669 +90,324 @@ export function Toolbar({
   const [searchQuery, setSearchQuery] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  // Sync Modal State
-  const [showSyncModal, setShowSyncModal] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [syncErrorMessage, setSyncErrorMessage] = useState('');
-  const [syncTargetPath, setSyncTargetPath] = useState('');
-  const [customKeyInput, setCustomKeyInput] = useState(
-    getStoredSupabaseKey() === SUPABASE_ANON_KEY ? '' : getStoredSupabaseKey()
-  );
+  const [showPublish, setShowPublish] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
 
-  // Load manifest on mount
   const loadManifest = async () => {
     try {
       const data = await fetchAssetWithFallback('release-manifest.json');
-      if (data.items) {
-        setManifest(data.items);
-      }
+      if (data.items) setManifest(data.items);
     } catch (err) {
       console.error('Failed to load release manifest:', err);
     }
   };
 
   useEffect(() => {
-    loadManifest();
+    void loadManifest();
   }, []);
 
-  // Filtered items based on search query
-  const filteredSongs = searchQuery.trim()
-    ? manifest.filter((item) =>
-        item.storageTitle.toLowerCase().includes(searchQuery.toLowerCase())
-      )
+  const query = searchQuery.trim().toLowerCase();
+  const filteredSongs = query
+    ? manifest.filter((item) => item.storageTitle.toLowerCase().includes(query)).slice(0, 60)
     : [];
+
+  const matchedSong = manifest.find(
+    (item) => item.storageTitle.toLowerCase() === doc.metadata.title.trim().toLowerCase()
+  );
+  const publishTarget = {
+    title: doc.metadata.title,
+    album: doc.metadata.album,
+    dayOfMonth: matchedSong?.index,
+  };
+
+  const unsyncedWords = doc.lines.reduce(
+    (n, line) => n + line.words.filter((w) => w.timestamp === null).length,
+    0
+  );
 
   const handleSelectSong = async (song: ManifestItem) => {
     setSelectedSong(song);
-
-    // 1. Set metadata
     setMetadata({
       title: song.storageTitle,
       artist: 'th3scr1b3',
-      album: `${song.month.charAt(0).toUpperCase() + song.month.slice(1)} Releases`,
+      album: `${capitalize(song.month)} Releases`,
       by: 'th3scr1b3 LRC Tool',
       offset: 0,
     });
 
-    // 2. Load lyrics and timestamps from database if available
+    // Lyrics: word timings from the release data when present, else the plain-text fallback.
     try {
       const releaseData = await fetchAssetWithFallback('release-data.json');
       const matchedRelease = releaseData.releases?.find(
-        (r: any) => r.title.toLowerCase() === song.storageTitle.toLowerCase()
+        (r: { title?: string }) => r.title?.toLowerCase() === song.storageTitle.toLowerCase()
       );
 
-      if (matchedRelease && matchedRelease.lyricsSegments && matchedRelease.lyricsWords) {
-        console.log('Found word-level timestamps in database. Reconstructing...');
-        const reconstructed = reconstructLinesFromAnalysis(
-          matchedRelease.lyricsSegments,
-          matchedRelease.lyricsWords
+      if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
+        onImportSyncedLines(
+          reconstructLinesFromAnalysis(matchedRelease.lyricsSegments, matchedRelease.lyricsWords)
         );
-        onImportSyncedLines(reconstructed);
         setLyricsRaw(matchedRelease.lyrics || '');
       } else {
-        // Fall back to plain lyric fallback database
-        console.log('No word-level timings found. Fetching fallback lyrics...');
         const lyricsDb = await fetchAssetWithFallback('lyrics-fallback.json');
         const normalizedKey = song.storageTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const matched = lyricsDb[normalizedKey];
-        if (matched && matched.lyrics) {
-          setLyricsRaw(matched.lyrics);
-        } else {
-          setLyricsRaw('// No lyrics found in database. Paste your lyrics here.');
-        }
+        setLyricsRaw(
+          lyricsDb[normalizedKey]?.lyrics || '// No lyrics found in database. Paste your lyrics here.'
+        );
       }
     } catch (err) {
       console.error('Failed to load lyrics analysis/fallback:', err);
       setLyricsRaw('// Error loading lyrics database. Paste your lyrics here.');
     }
 
-    // 3. Resolve audio storage URL from verified dayFileMap on Cloudflare R2
-    const paddedDay = String(song.index).padStart(2, '0');
-    const songMonth = song.month.toLowerCase();
-    const mapEntries = Object.values(dayFileMap as Record<string, any>);
-    const mapped =
-      (dayFileMap as Record<string, any>)[String(song.index)] ||
-      (dayFileMap as Record<string, any>)[String(paddedDay)] ||
-      mapEntries.find(
-        (m: any) =>
-          m.month?.toLowerCase() === songMonth &&
-          (m.dayOfMonth === song.index || m.day === song.index)
-      ) ||
-      mapEntries.find(
-        (m: any) =>
-          m.month?.toLowerCase() === songMonth &&
-          m.audio?.toLowerCase().includes(song.storageTitle.toLowerCase())
-      );
-
-    let audioUrl: string;
-    if (mapped && mapped.audio) {
-      audioUrl = `${STORAGE_BASE}/${mapped.audio}`;
-    } else {
-      // Default to .mp3 on Cloudflare R2 CDN
-      const fileName = `${paddedDay} - ${song.storageTitle}.mp3`;
-      audioUrl = `${STORAGE_BASE}/audio/${songMonth}/${encodeURIComponent(fileName)}`;
-    }
-
-    setAudioUrl(audioUrl);
+    setAudioUrl(resolveAudioUrl(song));
     setSearchQuery(song.storageTitle);
     setShowDropdown(false);
   };
 
-  // Reload / Refresh active song & manifest
   const handleReload = async () => {
     setIsReloading(true);
     await loadManifest();
-
-    if (selectedSong) {
-      await handleSelectSong(selectedSong);
-    } else if (doc.metadata.title) {
-      const matched = manifest.find(
-        (s) => s.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
-      );
-      if (matched) {
-        await handleSelectSong(matched);
-      }
-    }
+    const song =
+      selectedSong ||
+      manifest.find((s) => s.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase());
+    if (song) await handleSelectSong(song);
     setIsReloading(false);
   };
 
   const handleLocalFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setAudioUrl(url);
-
-      const baseName = file.name.replace(/\.[^/.]+$/, '');
-      const parts = baseName.split(' - ');
-      if (parts.length === 2) {
-        setMetadata({
-          title: parts[1],
-          artist: parts[0],
-          album: '',
-          by: 'LRC Tool',
-          offset: 0,
-        });
-      } else {
-        setMetadata({
-          title: baseName,
-          artist: 'Unknown Artist',
-          album: '',
-          by: 'LRC Tool',
-          offset: 0,
-        });
-      }
-    }
+    if (!file) return;
+    setAudioUrl(URL.createObjectURL(file));
+    const baseName = file.name.replace(/\.[^/.]+$/, '');
+    const parts = baseName.split(' - ');
+    setMetadata({
+      title: parts.length === 2 ? parts[1] : baseName,
+      artist: parts.length === 2 ? parts[0] : 'Unknown Artist',
+      album: '',
+      by: 'LRC Tool',
+      offset: 0,
+    });
   };
 
-  const handleCopyToClipboard = () => {
-    const formatted = formatEnhancedLRC(doc);
-    navigator.clipboard.writeText(formatted);
-    alert('Copied Enhanced LRC to clipboard!');
-  };
-
-  // Execute database upload with active or custom key
-  const executeSyncUpload = async (keyOverride?: string) => {
-    if (!doc.metadata.title) {
-      alert('Please load or enter a song title before syncing.');
-      return;
-    }
-
-    setIsSyncing(true);
-    setSyncStatus('idle');
-    setSyncErrorMessage('');
-
-    const formattedLrc = formatEnhancedLRC(doc);
-    const month = (doc.metadata.album || 'january').toLowerCase();
-
-    let monthPath = 'january';
-    const months = [
-      'january',
-      'february',
-      'march',
-      'april',
-      'may',
-      'june',
-      'july',
-      'august',
-      'september',
-      'october',
-      'november',
-      'december',
-    ];
-    for (const m of months) {
-      if (month.includes(m)) {
-        monthPath = m;
-        break;
-      }
-    }
-
-    const matchedSong = manifest.find(
-      (item) => item.storageTitle.toLowerCase() === doc.metadata.title.toLowerCase()
-    );
-    const paddedDay = matchedSong ? String(matchedSong.index).padStart(2, '0') : '01';
-    const cleanTitle = doc.metadata.title.trim();
-    const fileName = `${paddedDay} - ${cleanTitle}.lrc`;
-    const storagePath = `lyrics/${monthPath}/${fileName}`;
-    setSyncTargetPath(storagePath);
-
+  const handleCopy = async () => {
     try {
-      const activeClient = getSupabaseClient(keyOverride);
-      const fileBlob = new Blob([formattedLrc], { type: 'text/plain;charset=utf-8' });
-
-      // 1. Also update the lyrics in the database releases table
-      let dbUpdated = false;
-      try {
-        const { error: dbError } = await activeClient
-          .from('releases')
-          .update({
-            lyrics: formattedLrc,
-          })
-          .ilike('title', `%${cleanTitle}%`);
-        if (!dbError) {
-          dbUpdated = true;
-          console.log(`Lyrics successfully synced to releases table for "${cleanTitle}".`);
-        }
-      } catch (dbErr) {
-        console.warn('Database releases lyrics update notice:', dbErr);
-      }
-
-      // 2. If a custom write key was provided, ensure bucket exists
-      if (keyOverride && keyOverride.trim()) {
-        try {
-          await activeClient.storage.createBucket('releaseready', { public: true });
-        } catch (_) {}
-      }
-
-      // 3. Storage upload attempt
-      let { error } = await activeClient.storage
-        .from('releaseready')
-        .upload(storagePath, fileBlob, {
-          cacheControl: '3600',
-          upsert: true,
-          contentType: 'text/plain;charset=utf-8',
-        });
-
-      // Encoded path fallback retry if 400 (except when bucket itself is missing)
-      if (
-        error &&
-        (error as any).statusCode === 400 &&
-        !(error as any).message?.toLowerCase().includes('bucket not found')
-      ) {
-        const encodedPath = `lyrics/${monthPath}/${encodeURIComponent(fileName)}`;
-        const retryRes = await activeClient.storage
-          .from('releaseready')
-          .upload(encodedPath, fileBlob, {
-            cacheControl: '3600',
-            upsert: true,
-            contentType: 'text/plain;charset=utf-8',
-          });
-        if (!retryRes.error) {
-          error = null;
-        }
-      }
-
-      if (error) {
-        // If storage upload failed but database updated, treat as partial success with guidance
-        const isBucketNotFound =
-          (error as any)?.message?.toLowerCase().includes('bucket not found') ||
-          (error as any)?.statusCode === '400' ||
-          (error as any)?.statusCode === 400;
-        const isRlsError =
-          (error as any)?.message?.includes('row-level security') ||
-          (error as any)?.statusCode === '403' ||
-          (error as any)?.statusCode === 403 ||
-          (error as any)?.error === 'Unauthorized' ||
-          (error as any)?.message?.includes('violates row-level security');
-
-        setSyncStatus(dbUpdated ? 'success' : 'error');
-        setSyncErrorMessage(
-          isBucketNotFound
-            ? 'Storage bucket "releaseready" is not hosted on Supabase (media is on Cloudflare R2 at files.th3scr1b3.art).' +
-              (dbUpdated ? ' Lyrics saved to database releases table! You can also download or copy the .lrc file below.' : ' Please download or copy the .lrc file below.')
-            : isRlsError
-            ? 'Storage Row-Level Security (RLS) Restriction: Anonymous write operations are blocked on the releaseready bucket. Please enter a Supabase Service Role Key below or download/copy your LRC file.'
-            : error.message || 'Storage upload failed. Please verify storage permissions or use direct download.'
-        );
-        setShowSyncModal(true);
-        return;
-      }
-
-      setSyncStatus('success');
-      setShowSyncModal(true);
-    } catch (err: any) {
-      console.warn('Database Storage Sync Exception:', err);
-      const isRlsError =
-        err?.message?.includes('row-level security') ||
-        err?.statusCode === '403' ||
-        err?.statusCode === 403 ||
-        err?.error === 'Unauthorized' ||
-        err?.message?.includes('violates row-level security');
-
-      setSyncStatus('error');
-      setSyncErrorMessage(
-        isRlsError
-          ? 'Storage Row-Level Security (RLS) Restriction: Anonymous write operations are blocked on the releaseready bucket. Please enter a Supabase Service Role Key below or download/copy your LRC file.'
-          : err.message || 'Storage upload failed. Please verify storage permissions or use direct download.'
-      );
-      setShowSyncModal(true);
-    } finally {
-      setIsSyncing(false);
+      await navigator.clipboard.writeText(formatEnhancedLRC(doc));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setPreviewContent(formatEnhancedLRC(doc));
     }
   };
 
-  const handleSaveKeyAndRetry = () => {
-    setStoredSupabaseKey(customKeyInput);
-    executeSyncUpload(customKeyInput || undefined);
+  const handlePublish = async () => {
+    if (!doc.metadata.title.trim()) return;
+    setIsPublishing(true);
+    setPublishResult(null);
+    try {
+      setPublishResult(await publishLRC(publishTarget, formatEnhancedLRC(doc)));
+    } catch (err) {
+      setPublishResult({
+        storagePath: storagePathFor(publishTarget),
+        storageOk: false,
+        storageError: err instanceof Error ? err.message : 'Publish failed.',
+        dbUpdated: false,
+      });
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  const openPublish = () => {
+    setPublishResult(null);
+    setShowPublish(true);
   };
 
   return (
-    <div style={styles.toolbar}>
-      <div style={styles.left}>
-        <div style={styles.logo}>th3scr1b3 LRC v2</div>
+    <header className="toolbar">
+      <div className="toolbar-group">
+        <a className="brand" href="/" aria-label="Lyric Runtime home">
+          <span className="kicker">
+            <span className="live-dot on" aria-hidden="true" /> lrc.th3scr1b3.art · Sync
+          </span>
+          <span className="brand-name">
+            Lyric <em>Runtime</em>
+          </span>
+        </a>
 
-        {/* Song search */}
-        <div style={{ position: 'relative' }}>
+        <div className="search">
           <input
-            type="text"
+            type="search"
             className="input"
-            style={{ width: '220px', fontFamily: 'var(--font-mono)' }}
-            placeholder="Search 365 songs..."
+            placeholder="Search the 365 catalog…"
+            aria-label="Search songs"
             value={searchQuery}
             onChange={(e) => {
               setSearchQuery(e.target.value);
               setShowDropdown(true);
             }}
             onFocus={() => setShowDropdown(true)}
+            onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setShowDropdown(false);
+              if (e.key === 'Enter' && filteredSongs[0]) void handleSelectSong(filteredSongs[0]);
+            }}
           />
-          {showDropdown && filteredSongs.length > 0 && (
-            <div style={styles.dropdown}>
-              {filteredSongs.map((song) => (
-                <div
-                  key={`${song.month}-${song.index}`}
-                  style={styles.dropdownItem}
-                  onClick={() => handleSelectSong(song)}
-                >
-                  {song.storageTitle} ({song.month})
+          {showDropdown && query && (
+            <div className="dropdown" role="listbox">
+              {filteredSongs.length > 0 ? (
+                filteredSongs.map((song) => (
+                  <button
+                    type="button"
+                    key={`${song.month}-${song.index}`}
+                    className="dropdown-item"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => void handleSelectSong(song)}
+                  >
+                    <span>{song.storageTitle}</span>
+                    <span>
+                      {song.month.slice(0, 3)} {String(song.index).padStart(2, '0')}
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <div className="dropdown-empty">
+                  {manifest.length ? 'No matches' : 'Catalog not loaded yet'}
                 </div>
-              ))}
-            </div>
-          )}
-          {showDropdown && searchQuery && filteredSongs.length === 0 && (
-            <div style={styles.dropdown}>
-              <div style={{ padding: '8px', color: 'var(--text-muted)' }}>No matches</div>
+              )}
             </div>
           )}
         </div>
 
-        {/* Reload / Refresh Button */}
         <button
           className="btn"
-          onClick={handleReload}
+          onClick={() => void handleReload()}
           disabled={isReloading}
-          title="Refresh database catalog and reload active song data"
-          style={styles.reloadBtn}
+          title="Refresh the catalog and reload the active song"
         >
           <svg
-            width="14"
-            height="14"
+            width="13"
+            height="13"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="2"
+            strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
-            style={{
-              animation: isReloading ? 'spin 1s linear infinite' : 'none',
-            }}
+            className={isReloading ? 'spin' : undefined}
+            aria-hidden="true"
           >
             <polyline points="23 4 23 10 17 10" />
             <polyline points="1 20 1 14 7 14" />
             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
           </svg>
-          <span>{isReloading ? 'Reloading...' : 'Reload'}</span>
+          {isReloading ? 'Reloading' : 'Reload'}
         </button>
 
-        {/* Local File Picker */}
         <label className="btn">
-          <span>Upload Audio File</span>
-          <input
-            type="file"
-            accept="audio/*"
-            style={{ display: 'none' }}
-            onChange={handleLocalFile}
-          />
+          Upload audio
+          <input type="file" accept="audio/*" hidden onChange={handleLocalFile} />
         </label>
       </div>
 
-      <div style={styles.right}>
+      <div className="toolbar-group">
         <button className="btn" onClick={() => setPreviewContent(formatEnhancedLRC(doc))}>
-          Preview LRC
+          Preview
         </button>
-        <button className="btn" onClick={handleCopyToClipboard}>
-          Copy LRC
-        </button>
-        <button
-          className="btn btn-primary"
-          style={{
-            backgroundColor: 'var(--accent-amber)',
-            borderColor: 'var(--accent-amber)',
-            color: 'var(--bg-primary)',
-          }}
-          onClick={() => executeSyncUpload()}
-          disabled={isSyncing}
-        >
-          {isSyncing ? 'Syncing...' : 'Sync Database'}
-        </button>
-        <button
-          className="btn"
-          style={{ padding: '6px 10px' }}
-          onClick={() => setShowSyncModal(true)}
-          title="Sync & Storage Credentials Settings"
-        >
-          ⚙️
+        <button className="btn" onClick={() => void handleCopy()}>
+          {copied ? 'Copied ✓' : 'Copy'}
         </button>
         <button className="btn btn-primary" onClick={onDownload}>
-          Export LRC (.lrc)
+          Export .lrc
         </button>
+        {account.isAdmin && (
+          <button className="btn btn-amber" onClick={openPublish} title="Publish to the vault">
+            Publish
+          </button>
+        )}
         <button className="btn btn-danger" onClick={onClear}>
           Reset
         </button>
+        <AccountChip account={account} />
       </div>
 
-      {/* Preview Modal */}
       {previewContent !== null && (
-        <div style={styles.modalOverlay} onClick={() => setPreviewContent(null)}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalHeader}>
-              <h3>Enhanced LRC (A2) Preview</h3>
-              <button className="btn btn-danger" onClick={() => setPreviewContent(null)}>
-                Close
-              </button>
-            </div>
-            <pre style={styles.previewContainer} className="mono">
-              {previewContent || '// Sync some words first to generate LRC'}
-            </pre>
+        <Modal title="Enhanced LRC" onClose={() => setPreviewContent(null)}>
+          <pre className="modal-pre">{previewContent || '// Sync some words first to generate LRC'}</pre>
+          <div className="modal-row">
+            <button className="btn" onClick={() => void handleCopy()}>
+              {copied ? 'Copied ✓' : 'Copy'}
+            </button>
+            <button className="btn btn-primary" onClick={onDownload}>
+              Download .lrc
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* Sync & Storage Authorization Modal */}
-      {showSyncModal && (
-        <div style={styles.modalOverlay} onClick={() => setShowSyncModal(false)}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalHeader}>
-              <h3>Database Storage Sync</h3>
-              <button className="btn btn-danger" onClick={() => setShowSyncModal(false)}>
-                Close
-              </button>
-            </div>
-
-            <div style={styles.syncModalBody}>
-              <div style={styles.targetInfo}>
-                <span style={{ color: 'var(--text-muted)' }}>Target Storage Path: </span>
-                <span className="mono" style={{ color: 'var(--accent-cyan)' }}>
-                  {syncTargetPath || 'lyrics/month/01 - title.lrc'}
-                </span>
-              </div>
-
-              {syncStatus === 'success' && (
-                <div style={styles.successBanner}>
-                  ✓ Enhanced LRC successfully uploaded to the <strong>releaseready</strong> bucket!
-                </div>
-              )}
-
-              {syncStatus === 'error' && (
-                <div style={styles.errorBanner}>
-                  <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                    ⚠️ Storage Authorization / Permission Notice
-                  </div>
-                  <div style={{ fontSize: '0.85rem' }}>{syncErrorMessage}</div>
-                </div>
-              )}
-
-              <div style={styles.keySection}>
-                <label style={styles.label}>Supabase Service Role Key / Write Credential (Optional)</label>
-                <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                  <input
-                    type="password"
-                    className="input mono"
-                    placeholder="Paste Supabase Service Key..."
-                    value={customKeyInput}
-                    onChange={(e) => setCustomKeyInput(e.target.value)}
-                    style={{ flexGrow: 1 }}
-                  />
-                  <button
-                    className="btn btn-primary"
-                    onClick={handleSaveKeyAndRetry}
-                    disabled={isSyncing}
-                  >
-                    {isSyncing ? 'Saving...' : 'Save & Retry Sync'}
-                  </button>
-                </div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  Providing a write key bypasses public RLS restrictions and writes directly to Supabase storage.
-                </div>
-              </div>
-
-              <div style={styles.fallbackSection}>
-                <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-secondary)' }}>
-                  Offline & Fallback Export Actions:
-                </span>
-                <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
-                  <button className="btn" onClick={handleCopyToClipboard}>
-                    📋 Copy LRC Content
-                  </button>
-                  <button className="btn btn-primary" onClick={onDownload}>
-                    📥 Download .lrc File
-                  </button>
-                </div>
-              </div>
-            </div>
+      {showPublish && (
+        <Modal title="Publish to the vault" onClose={() => setShowPublish(false)}>
+          <p className="modal-note">
+            Uploads this enhanced LRC to the <code>releaseready</code> bucket and writes it to the
+            matching release in the database, as your signed-in account.
+          </p>
+          <div className="modal-target">
+            <span className="kicker">Target</span>
+            <code>{storagePathFor(publishTarget)}</code>
           </div>
-        </div>
+
+          {!account.user && (
+            <div className="banner banner-warn">
+              <strong>Signed out</strong>
+              <a href={signInUrl()}>Sign in on your th3scr1b3 profile</a> to publish.
+            </div>
+          )}
+
+          {unsyncedWords > 0 && (
+            <div className="banner banner-warn">
+              <strong>{unsyncedWords} words not synced</strong>
+              They export with the previous word's time (or 00:00 on an unsynced line).
+            </div>
+          )}
+
+          {publishResult && (
+            <>
+              <div className={`banner ${publishResult.storageOk ? 'banner-ok' : 'banner-err'}`}>
+                <strong>File {publishResult.storageOk ? 'uploaded' : 'not uploaded'}</strong>
+                {publishResult.storageOk ? publishResult.storagePath : publishResult.storageError}
+              </div>
+              <div className={`banner ${publishResult.dbUpdated ? 'banner-ok' : 'banner-warn'}`}>
+                <strong>Release {publishResult.dbUpdated ? 'updated' : 'not updated'}</strong>
+                {publishResult.dbUpdated ? `Lyrics saved on "${doc.metadata.title.trim()}".` : publishResult.dbNote}
+              </div>
+            </>
+          )}
+
+          <div className="modal-row">
+            <button
+              className="btn btn-amber btn-lg"
+              onClick={() => void handlePublish()}
+              disabled={isPublishing || !account.user || !doc.metadata.title.trim()}
+            >
+              {isPublishing ? 'Publishing…' : publishResult ? 'Publish again' : 'Publish'}
+            </button>
+          </div>
+
+          <div className="divider" />
+          <span className="kicker">Or keep it local</span>
+          <div className="modal-row">
+            <button className="btn" onClick={() => void handleCopy()}>
+              {copied ? 'Copied ✓' : 'Copy LRC'}
+            </button>
+            <button className="btn btn-primary" onClick={onDownload}>
+              Download .lrc
+            </button>
+          </div>
+        </Modal>
       )}
-    </div>
+    </header>
   );
 }
-
-const styles = {
-  toolbar: {
-    height: '60px',
-    backgroundColor: 'var(--bg-secondary)',
-    borderBottom: '1px solid var(--border-color)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '0 20px',
-  },
-  left: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-  },
-  logo: {
-    fontSize: '1.1rem',
-    fontWeight: 'bold',
-    fontFamily: 'var(--font-sans)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '1px',
-    color: 'var(--accent-cyan)',
-    marginRight: '10px',
-  },
-  reloadBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    fontSize: '0.8rem',
-  },
-  right: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-  },
-  dropdown: {
-    position: 'absolute' as const,
-    top: '40px',
-    left: '0',
-    width: '220px',
-    backgroundColor: 'var(--bg-tertiary)',
-    border: '1px solid var(--border-color)',
-    borderRadius: 'var(--border-radius)',
-    zIndex: 1000,
-    maxHeight: '200px',
-    overflowY: 'auto' as const,
-  },
-  dropdownItem: {
-    padding: '8px 12px',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    transition: 'background-color 0.15s ease',
-  },
-  modalOverlay: {
-    position: 'fixed' as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 2000,
-  },
-  modal: {
-    width: '80%',
-    maxWidth: '650px',
-    backgroundColor: 'var(--bg-secondary)',
-    border: '1px solid var(--border-color)',
-    borderRadius: 'var(--border-radius)',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    maxHeight: '80vh',
-  },
-  modalHeader: {
-    padding: '15px 20px',
-    borderBottom: '1px solid var(--border-color)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  previewContainer: {
-    padding: '20px',
-    overflowY: 'auto' as const,
-    flexGrow: 1,
-    fontSize: '0.85rem',
-    whiteSpace: 'pre-wrap' as const,
-    color: 'var(--text-primary)',
-    lineHeight: '1.6',
-  },
-  syncModalBody: {
-    padding: '20px',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '16px',
-  },
-  targetInfo: {
-    fontSize: '0.85rem',
-    backgroundColor: 'var(--bg-tertiary)',
-    padding: '10px 14px',
-    borderRadius: '6px',
-    border: '1px solid var(--border-color)',
-  },
-  successBanner: {
-    backgroundColor: 'rgba(57, 255, 20, 0.1)',
-    border: '1px solid var(--accent-green)',
-    color: 'var(--accent-green)',
-    padding: '12px',
-    borderRadius: '6px',
-    fontSize: '0.85rem',
-  },
-  errorBanner: {
-    backgroundColor: 'rgba(255, 51, 102, 0.1)',
-    border: '1px solid var(--accent-red)',
-    color: 'var(--accent-red)',
-    padding: '12px',
-    borderRadius: '6px',
-  },
-  keySection: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '4px',
-    marginTop: '6px',
-  },
-  label: {
-    fontSize: '0.8rem',
-    fontWeight: 'bold' as const,
-    color: 'var(--text-secondary)',
-  },
-  fallbackSection: {
-    borderTop: '1px solid var(--border-color)',
-    paddingTop: '14px',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '8px',
-  },
-};

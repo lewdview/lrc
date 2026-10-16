@@ -13,82 +13,33 @@ export function LyricsEditor({ rawText, setRawText, onParsed }: LyricsEditorProp
 
   const handleParse = () => {
     const parsedLines = parseLyrics(rawText);
-    const wordCount = parsedLines.reduce((acc: number, line: Line) => acc + line.words.length, 0);
+    const wordCount = parsedLines.reduce((acc, line) => acc + line.words.length, 0);
     onParsed(parsedLines);
-    setInfo(`Parsed successfully: ${parsedLines.length} lines, ${wordCount} words.`);
+    setInfo(`Parsed ${parsedLines.length} lines, ${wordCount} words.`);
   };
 
   return (
-    <div style={styles.container}>
-      <h3 style={styles.title}>Raw Lyrics Editor</h3>
-      <p style={styles.subtitle}>
-        Paste raw text lyrics below. Blank lines will be preserved as pauses. Duplicate spaces are ignored.
-      </p>
+    <div className="editor">
+      <div className="editor-head">
+        <span className="kicker kicker-hot">Step 01</span>
+        <h2>Paste the words</h2>
+        <p>One line per lyric line. Blank lines stay as pauses; extra spaces are ignored.</p>
+      </div>
 
       <textarea
-        style={styles.textarea}
-        className="mono"
-        placeholder="Paste your lyrics here...&#10;e.g.&#10;Hello darkness my old friend&#10;I've come to talk with you again"
+        className="editor-text"
+        aria-label="Lyrics"
+        placeholder={'Paste your lyrics here…\ne.g.\nHello darkness my old friend\nI’ve come to talk with you again'}
         value={rawText}
         onChange={(e) => setRawText(e.target.value)}
       />
 
-      <div style={styles.footer}>
-        <button
-          className="btn btn-primary"
-          style={{ padding: '10px 20px', fontSize: '0.95rem' }}
-          onClick={handleParse}
-          disabled={!rawText.trim()}
-        >
-          Parse Lyrics
+      <div className="editor-foot">
+        <button className="btn btn-primary btn-lg" onClick={handleParse} disabled={!rawText.trim()}>
+          Parse lyrics → sync
         </button>
-
-        {info && <span style={styles.info} className="mono">{info}</span>}
+        {info && <span className="editor-info">{info}</span>}
       </div>
     </div>
   );
 }
-
-const styles = {
-  container: {
-    padding: '20px',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    height: '100%',
-    backgroundColor: 'var(--bg-primary)',
-  },
-  title: {
-    fontSize: '1.1rem',
-    color: 'var(--accent-cyan)',
-    marginBottom: '6px',
-    fontWeight: 600,
-  },
-  subtitle: {
-    fontSize: '0.85rem',
-    color: 'var(--text-secondary)',
-    marginBottom: '15px',
-  },
-  textarea: {
-    flexGrow: 1,
-    backgroundColor: 'var(--bg-secondary)',
-    border: '1px solid var(--border-color)',
-    borderRadius: 'var(--border-radius)',
-    color: 'var(--text-primary)',
-    padding: '15px',
-    fontSize: '0.95rem',
-    resize: 'none' as const,
-    outline: 'none',
-    lineHeight: '1.6',
-    transition: 'border-color var(--transition-fast)',
-  },
-  footer: {
-    marginTop: '15px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '20px',
-  },
-  info: {
-    fontSize: '0.85rem',
-    color: 'var(--accent-green)',
-  },
-};

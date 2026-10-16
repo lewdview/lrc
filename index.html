@@ -4,12 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>lrc</title>
+    <meta name="theme-color" content="#050402" />
+    <title>Lyric Runtime // th3scr1b3</title>
+    <meta name="description" content="Sync every 365 lyric to its take, word by word, and export enhanced LRC. A th3scr1b3.art layer." />
+    <meta property="og:title" content="Lyric Runtime // th3scr1b3" />
+    <meta property="og:description" content="Sync every 365 lyric to its take, word by word, and export enhanced LRC." />
+    <meta property="og:url" content="https://lrc.th3scr1b3.art" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <!-- th3scr1b3 ecosystem bar: shared layer switcher. Layers live in https://th3scr1b3.art/ecosystem.json -->
-    <script src="https://th3scr1b3.art/ecosystem-bar.js" defer></script>
+    <!-- th3scr1b3 ecosystem bar: shared layer switcher + visit tracking. Layers live in https://th3scr1b3.art/ecosystem.json -->
+    <script src="https://th3scr1b3.art/ecosystem-bar.js" data-avoid=".statusbar" defer></script>
   </body>
 </html>

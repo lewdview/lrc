@@ -5,86 +5,48 @@ interface StatusBarProps {
   lastSaved: string | null;
 }
 
+const SHORTCUTS: Array<[string, string]> = [
+  ['Space', 'Sync'],
+  ['←/→', 'Nudge 100ms'],
+  ['⇧ ←/→', 'Nudge 10ms'],
+  ['Ctrl Z', 'Undo'],
+  ['⌫', 'Prev word'],
+  ['Enter', 'Next line'],
+];
+
 export function StatusBar({ lines, lastSaved }: StatusBarProps) {
-  // Compute stats
   let totalWords = 0;
   let syncedWords = 0;
-
-  lines.forEach((line) => {
-    line.words.forEach((word) => {
+  for (const line of lines) {
+    for (const word of line.words) {
       totalWords++;
-      if (word.timestamp !== null) {
-        syncedWords++;
-      }
-    });
-  });
-
+      if (word.timestamp !== null) syncedWords++;
+    }
+  }
   const percentage = totalWords > 0 ? Math.round((syncedWords / totalWords) * 100) : 0;
 
   return (
-    <div style={styles.statusBar} className="mono">
-      <div style={styles.left}>
-        <div style={styles.stat}>
-          <span>WORDS: </span>
-          <span style={{ color: 'var(--accent-cyan)' }}>
-            {syncedWords} / {totalWords}
-          </span>
-          <span style={{ color: 'var(--text-muted)' }}> ({percentage}%)</span>
-        </div>
-
-        {lastSaved && (
-          <div style={styles.stat}>
-            <span style={{ color: 'var(--accent-green)' }}>● AUTO-SAVED {lastSaved}</span>
+    <footer className="statusbar">
+      <div className="status-left">
+        <div className="status-progress">
+          <span>Words</span>
+          <div className="status-bar-track" aria-hidden="true">
+            <div className="status-bar-fill" style={{ width: `${percentage}%` }} />
           </div>
-        )}
+          <span>
+            {syncedWords}/{totalWords} ({percentage}%)
+          </span>
+        </div>
+        {lastSaved && <span className="status-saved">● Saved {lastSaved}</span>}
       </div>
 
-      <div style={styles.shortcuts}>
-        <span>SPACE: Sync</span>
-        <span style={styles.divider}>|</span>
-        <span>Arrows: Nudge (100ms)</span>
-        <span style={styles.divider}>|</span>
-        <span>Shift+Arrows: Nudge (10ms)</span>
-        <span style={styles.divider}>|</span>
-        <span>Ctrl+Z: Undo</span>
-        <span style={styles.divider}>|</span>
-        <span>Backspace: Prev Word</span>
-        <span style={styles.divider}>|</span>
-        <span>Enter: Next Line</span>
+      <div className="status-keys">
+        {SHORTCUTS.map(([key, label]) => (
+          <span key={key}>
+            <kbd>{key}</kbd> {label}
+          </span>
+        ))}
       </div>
-    </div>
+    </footer>
   );
 }
-
-const styles = {
-  statusBar: {
-    height: '30px',
-    backgroundColor: 'var(--bg-secondary)',
-    borderTop: '1px solid var(--border-color)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '0 20px',
-    fontSize: '0.7rem',
-    color: 'var(--text-secondary)',
-  },
-  left: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '20px',
-  },
-  stat: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '5px',
-  },
-  shortcuts: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    color: 'var(--text-muted)',
-  },
-  divider: {
-    color: '#2e2e3a',
-  },
-};
