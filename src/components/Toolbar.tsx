@@ -68,9 +68,14 @@ function resolveAudioUrl(song: ManifestItem): string {
   const songMonth = song.month.toLowerCase();
   const map = dayFileMap as Record<string, DayFileEntry>;
   const entries = Object.values(map);
+  // The manifest's index is the track number WITHIN its month, but the day
+  // file map is keyed by the global day of the 365 — convert first, the same
+  // way the timings path does. Looking the map up by the raw index resolves
+  // to the wrong song for every non-January pick (e.g. February track 4,
+  // "The Light" / global day 35, played global day 4, "We're Only Human").
+  const globalDay = dayOfYear(song.month, song.index);
   const mapped =
-    map[String(song.index)] ||
-    map[paddedDay] ||
+    (globalDay !== null ? map[String(globalDay)] : undefined) ||
     entries.find(
       (m) => m.month?.toLowerCase() === songMonth && (m.dayOfMonth === song.index || m.day === song.index)
     ) ||
