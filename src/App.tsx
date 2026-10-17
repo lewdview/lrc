@@ -9,7 +9,9 @@ import { SyncViewport } from './components/SyncViewport';
 import { Timeline } from './components/Timeline';
 import { MetadataPanel } from './components/MetadataPanel';
 import { StatusBar } from './components/StatusBar';
+import { useAccount } from './hooks/useAccount';
 import { downloadLRC } from './utils/exportLRC';
+import { parseLyrics } from './utils/parser';
 import type { Line, LyricsDocument } from './types/lyric';
 
 const LOCAL_STORAGE_KEY = 'th3scr1b3_lrc_session';
@@ -18,6 +20,9 @@ export default function App() {
   const [rawText, setRawText] = useState('');
   const [viewTab, setViewTab] = useState<'editor' | 'sync'>('editor');
   const [lastSaved, setLastSaved] = useState<string | null>(null);
+
+  // Shared th3scr1b3.art login
+  const account = useAccount();
 
   // Audio system
   const audioClock = useAudioClock();
@@ -158,10 +163,26 @@ export default function App() {
   // Enable shortcuts in sync tab only
   useKeyboardShortcuts(keyboardActions, viewTab === 'sync');
 
+  const tabs: Array<{ id: 'editor' | 'sync'; label: string; onClick: () => void }> = [
+    { id: 'editor', label: 'Lyrics', onClick: () => setViewTab('editor') },
+    {
+      id: 'sync',
+      label: 'Sync words',
+      onClick: () => {
+        // Parse on the way in if the text was never parsed.
+        if (tapSync.lines.length === 0 && rawText.trim()) handleLyricsParsed(parseLyrics(rawText));
+        else setViewTab('sync');
+      },
+    },
+  ];
+
   return (
-    <div style={styles.appContainer}>
+    <div className="app">
+      <div className="grain" aria-hidden="true" />
+
       <Toolbar
         document={activeDocument}
+        account={account}
         setMetadata={tapSync.setMetadata}
         setLyricsRaw={setRawText}
         setAudioUrl={audioClock.setAudioUrl}
@@ -187,45 +208,26 @@ export default function App() {
         audioUrl={audioClock.audioUrl}
       />
 
-      {/* Tabs bar */}
-      <div style={styles.tabsBar}>
-        <button
-          style={{
-            ...styles.tabBtn,
-            ...(viewTab === 'editor' ? styles.tabBtnActive : {}),
-          }}
-          onClick={() => setViewTab('editor')}
-        >
-          1. Edit Lyrics Text
-        </button>
-        <button
-          style={{
-            ...styles.tabBtn,
-            ...(viewTab === 'sync' ? styles.tabBtnActive : {}),
-          }}
-          onClick={() => {
-            if (tapSync.lines.length === 0 && rawText.trim()) {
-              // Auto-parse on tab switch if not parsed yet
-              handleLyricsParsed(parseLyrics(rawText));
-            } else {
-              setViewTab('sync');
-            }
-          }}
-        >
-          2. Synchronize Words
-        </button>
-      </div>
+      <nav className="tabs" role="tablist" aria-label="Workflow">
+        {tabs.map((tab, i) => (
+          <button
+            key={tab.id}
+            role="tab"
+            aria-selected={viewTab === tab.id}
+            className={`tab ${viewTab === tab.id ? 'active' : ''}`}
+            onClick={tab.onClick}
+          >
+            <span className="tab-index">{String(i + 1).padStart(2, '0')}</span>
+            {tab.label}
+          </button>
+        ))}
+      </nav>
 
-      <div style={styles.mainContent}>
+      <main className="main">
         {viewTab === 'editor' ? (
-          <LyricsEditor
-            rawText={rawText}
-            setRawText={setRawText}
-            onParsed={handleLyricsParsed}
-          />
+          <LyricsEditor rawText={rawText} setRawText={setRawText} onParsed={handleLyricsParsed} />
         ) : (
-          <div style={styles.workspace}>
-            {/* Timeline Sidebar */}
+          <div className="workspace">
             <Timeline
               lines={tapSync.lines}
               currentTime={audioClock.currentTime}
@@ -239,25 +241,21 @@ export default function App() {
               onAddWord={tapSync.addWordToLine}
               onDeleteWord={tapSync.deleteWord}
             />
-
-            {/* Sync Viewport Area */}
-            <div style={{ flexGrow: 1, height: '100%' }}>
-              <SyncViewport
-                lines={tapSync.lines}
-                activeLineIndex={tapSync.activeLineIndex}
-                activeWordIndex={tapSync.activeWordIndex}
-                currentTime={audioClock.currentTime}
-                onWordClick={tapSync.jumpToWord}
-                onReTimeLine={tapSync.reTimeLine}
-                onEditWordText={tapSync.editWordText}
-                onAddWord={tapSync.addWordToLine}
-                onDeleteWord={tapSync.deleteWord}
-                onAddLine={tapSync.addLine}
-              />
-            </div>
+            <SyncViewport
+              lines={tapSync.lines}
+              activeLineIndex={tapSync.activeLineIndex}
+              activeWordIndex={tapSync.activeWordIndex}
+              currentTime={audioClock.currentTime}
+              onWordClick={tapSync.jumpToWord}
+              onReTimeLine={tapSync.reTimeLine}
+              onEditWordText={tapSync.editWordText}
+              onAddWord={tapSync.addWordToLine}
+              onDeleteWord={tapSync.deleteWord}
+              onAddLine={tapSync.addLine}
+            />
           </div>
         )}
-      </div>
+      </main>
 
       <MetadataPanel metadata={tapSync.metadata} onChange={tapSync.setMetadata} />
 
@@ -265,68 +263,3 @@ export default function App() {
     </div>
   );
 }
-
-// Helpers for on-demand parsing
-function parseLyrics(text: string): Line[] {
-  if (!text.trim()) return [];
-  return text.split(/\r?\n/).map((lineText) => {
-    const trimmed = lineText.trim();
-    const rawWords = trimmed ? trimmed.split(/\s+/) : [];
-    return {
-      id: Math.random().toString(36).substring(2, 9),
-      words: rawWords.map((wordText) => ({
-        id: Math.random().toString(36).substring(2, 9),
-        text: wordText,
-        timestamp: null,
-      })),
-    };
-  });
-}
-
-const styles = {
-  appContainer: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    height: '100vh',
-    width: '100vw',
-    backgroundColor: 'var(--bg-primary)',
-    color: 'var(--text-primary)',
-    overflow: 'hidden',
-  },
-  tabsBar: {
-    display: 'flex',
-    backgroundColor: 'var(--bg-secondary)',
-    borderBottom: '1px solid var(--border-color)',
-    padding: '0 20px',
-  },
-  tabBtn: {
-    background: 'none',
-    border: 'none',
-    padding: '10px 20px',
-    color: 'var(--text-muted)',
-    fontSize: '0.85rem',
-    fontWeight: 'bold' as const,
-    cursor: 'pointer',
-    borderBottomWidth: '2px',
-    borderBottomStyle: 'solid' as const,
-    borderBottomColor: 'transparent',
-    transition: 'all 0.15s ease',
-  },
-  tabBtnActive: {
-    color: 'var(--accent-cyan)',
-    borderBottomColor: 'var(--accent-cyan)',
-  },
-  mainContent: {
-    flexGrow: 1,
-    display: 'flex',
-    flexDirection: 'column' as const,
-    overflow: 'hidden',
-    position: 'relative' as const,
-  },
-  workspace: {
-    display: 'flex',
-    flexGrow: 1,
-    height: '100%',
-    overflow: 'hidden',
-  },
-};

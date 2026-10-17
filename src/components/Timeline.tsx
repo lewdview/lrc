@@ -56,6 +56,13 @@ export function Timeline({
   // Sort by timestamp
   syncedWords.sort((a, b) => (a.word.timestamp || 0) - (b.word.timestamp || 0));
 
+  // The row under the playhead: the last synced word at or before currentTime.
+  let playingId: string | null = null;
+  for (const { word } of syncedWords) {
+    if ((word.timestamp ?? 0) <= currentTime) playingId = word.id;
+    else break;
+  }
+
   // Determine active item to scroll to
   const activeWordId = lines[activeLineIndex]?.words?.[activeWordIndex]?.id;
 
@@ -83,75 +90,50 @@ export function Timeline({
   };
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h4 style={styles.title}>Timeline / Synced Words</h4>
-        <span style={styles.count} className="mono">
-          {syncedWords.length} Words
-        </span>
+    <aside className="timeline" aria-label="Synced words">
+      <div className="timeline-head">
+        <span className="kicker">Timeline</span>
+        <span className="chip chip-cyan">{syncedWords.length} synced</span>
       </div>
 
-      <div ref={listRef} style={styles.list}>
+      <div ref={listRef} className="timeline-list">
         {syncedWords.length === 0 ? (
-          <div style={styles.empty}>
-            No synced words yet. Start tapping spacebar to synchronize or edit text.
+          <div className="timeline-empty">
+            Nothing synced yet. Press play and tap <kbd>Space</kbd> on each word.
           </div>
         ) : (
           syncedWords.map(({ word, lineIndex, wordIndex }) => {
-            const isCursorActive =
-              lineIndex === activeLineIndex && wordIndex === activeWordIndex;
-            const isCurrentlyPlaying =
-              word.timestamp !== null &&
-              currentTime >= word.timestamp &&
-              (syncedWords.find(
-                (next, idx) =>
-                  idx > syncedWords.findIndex((w) => w.word.id === word.id) &&
-                  (next.word.timestamp || 0) > (word.timestamp || 0)
-              )?.word.timestamp || Infinity) > currentTime;
+            const isCursorActive = lineIndex === activeLineIndex && wordIndex === activeWordIndex;
+            const isCurrentlyPlaying = word.id === playingId;
             const isEditing = editingWordId === word.id;
 
             return (
               <div
                 key={word.id}
                 data-active={isCursorActive}
-                style={{
-                  ...styles.row,
-                  ...(isCursorActive ? styles.rowActive : {}),
-                  ...(isCurrentlyPlaying ? styles.rowPlaying : {}),
-                }}
+                className={`trow ${isCursorActive ? 'cursor' : ''} ${isCurrentlyPlaying ? 'playing' : ''}`}
               >
-                {/* Click to Seek / playhead indicator */}
-                <div style={styles.seekZone} onClick={() => onSeek(word.timestamp || 0)}>
-                  <div
-                    style={{
-                      ...styles.bullet,
-                      ...(isCurrentlyPlaying ? styles.bulletPlaying : {}),
-                    }}
-                  />
-
-                  {/* Timestamp Input */}
+                <div className="trow-seek" onClick={() => onSeek(word.timestamp || 0)} title="Seek here">
+                  <span className="trow-dot" />
+                  {/* Keyed by timestamp so a nudge refreshes the uncontrolled field. */}
                   <input
+                    key={word.timestamp ?? 'none'}
                     type="text"
-                    className="input mono"
-                    style={styles.timeInput}
+                    className="input trow-time"
+                    aria-label={`Timestamp for “${word.text}”`}
                     defaultValue={formatTimestamp(word.timestamp)}
-                    onBlur={(e) =>
-                      handleTimestampChange(lineIndex, wordIndex, e.target.value)
-                    }
+                    onBlur={(e) => handleTimestampChange(lineIndex, wordIndex, e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.currentTarget.blur();
-                      }
+                      if (e.key === 'Enter') e.currentTarget.blur();
                     }}
                   />
                 </div>
 
-                {/* Word content / Inline Editor */}
                 {isEditing ? (
                   <input
                     type="text"
-                    className="input mono"
-                    style={styles.textInputInline}
+                    className="input trow-edit"
+                    aria-label="Edit word"
                     value={editText}
                     autoFocus
                     onChange={(e) => setEditText(e.target.value)}
@@ -163,64 +145,33 @@ export function Timeline({
                   />
                 ) : (
                   <div
-                    style={{
-                      ...styles.wordText,
-                      ...(isCursorActive ? { color: 'var(--accent-cyan)' } : {}),
-                      ...(isCurrentlyPlaying ? { fontWeight: 'bold' } : {}),
-                    }}
+                    className="trow-word"
                     onClick={() => onSelectWord(lineIndex, wordIndex)}
                     onDoubleClick={() => {
                       setEditingWordId(word.id);
                       setEditText(word.text);
                     }}
-                    title="Click to select. Double-click to edit word text."
+                    title="Click to select. Double-click to edit."
                   >
                     {word.text}
                   </div>
                 )}
 
-                {/* Nudge controls and Actions */}
-                <div style={styles.nudgers}>
-                  <button
-                    style={styles.nudgeBtn}
-                    onClick={() => onNudge(lineIndex, wordIndex, -100)}
-                    title="-100ms"
-                  >
-                    -100
-                  </button>
-                  <button
-                    style={styles.nudgeBtn}
-                    onClick={() => onNudge(lineIndex, wordIndex, -10)}
-                    title="-10ms"
-                  >
-                    -10
-                  </button>
-                  <button
-                    style={styles.nudgeBtn}
-                    onClick={() => onNudge(lineIndex, wordIndex, 10)}
-                    title="+10ms"
-                  >
-                    +10
-                  </button>
-                  <button
-                    style={styles.nudgeBtn}
-                    onClick={() => onNudge(lineIndex, wordIndex, 100)}
-                    title="+100ms"
-                  >
-                    +100
-                  </button>
-                  <button
-                    style={styles.nudgeBtn}
-                    onClick={() => onAddWord(lineIndex, wordIndex)}
-                    title="Insert word after this"
-                  >
+                <div className="trow-tools">
+                  {[-100, -10, 10, 100].map((delta) => (
+                    <button
+                      key={delta}
+                      className="nudge"
+                      onClick={() => onNudge(lineIndex, wordIndex, delta)}
+                      title={`${delta > 0 ? '+' : ''}${delta}ms`}
+                    >
+                      {delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                  <button className="nudge" onClick={() => onAddWord(lineIndex, wordIndex)} title="Insert a word after this">
                     +
                   </button>
-                  <button
-                    style={{ ...styles.nudgeBtn, ...styles.clearBtn }}
-                    onClick={() => onDeleteWord(lineIndex, wordIndex)}
-                    title="Delete word"
-                  >
+                  <button className="nudge nudge-x" onClick={() => onDeleteWord(lineIndex, wordIndex)} title="Delete word">
                     ×
                   </button>
                 </div>
@@ -229,124 +180,6 @@ export function Timeline({
           })
         )}
       </div>
-    </div>
+    </aside>
   );
 }
-
-const styles = {
-  container: {
-    width: '420px',
-    backgroundColor: 'var(--bg-secondary)',
-    borderRight: '1px solid var(--border-color)',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    height: '100%',
-  },
-  header: {
-    padding: '15px',
-    borderBottom: '1px solid var(--border-color)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  title: {
-    fontSize: '0.85rem',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-    fontWeight: 'bold' as const,
-    color: 'var(--text-secondary)',
-  },
-  count: {
-    fontSize: '0.75rem',
-    color: 'var(--accent-cyan)',
-    backgroundColor: 'var(--accent-cyan-dim)',
-    padding: '2px 6px',
-    borderRadius: '4px',
-  },
-  list: {
-    flexGrow: 1,
-    overflowY: 'auto' as const,
-    padding: '10px 0',
-  },
-  empty: {
-    padding: '30px',
-    textAlign: 'center' as const,
-    color: 'var(--text-muted)',
-    fontSize: '0.85rem',
-    lineHeight: '1.5',
-  },
-  row: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: '6px 10px',
-    borderBottom: '1px solid rgba(46, 46, 58, 0.3)',
-    gap: '8px',
-    transition: 'background-color 0.1s ease',
-  },
-  rowActive: {
-    backgroundColor: 'rgba(0, 240, 255, 0.04)',
-    borderLeft: '2px solid var(--accent-cyan)',
-  },
-  rowPlaying: {
-    backgroundColor: 'rgba(57, 255, 20, 0.02)',
-  },
-  seekZone: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    cursor: 'pointer',
-  },
-  bullet: {
-    width: '6px',
-    height: '6px',
-    borderRadius: '50%',
-    backgroundColor: 'var(--text-muted)',
-  },
-  bulletPlaying: {
-    backgroundColor: 'var(--accent-green)',
-    boxShadow: '0 0 6px var(--accent-green)',
-  },
-  timeInput: {
-    width: '72px',
-    padding: '2px 4px',
-    fontSize: '0.75rem',
-    textAlign: 'center' as const,
-  },
-  textInputInline: {
-    flexGrow: 1,
-    fontSize: '0.85rem',
-    padding: '2px 6px',
-    color: 'var(--accent-cyan)',
-  },
-  wordText: {
-    flexGrow: 1,
-    fontSize: '0.85rem',
-    fontWeight: 500,
-    cursor: 'pointer',
-    color: 'var(--text-primary)',
-    overflow: 'hidden' as const,
-    textOverflow: 'ellipsis' as const,
-    whiteSpace: 'nowrap' as const,
-  },
-  nudgers: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '2px',
-  },
-  nudgeBtn: {
-    background: 'var(--bg-tertiary)',
-    border: '1px solid var(--border-color)',
-    color: 'var(--text-secondary)',
-    fontSize: '0.65rem',
-    padding: '2px 4px',
-    cursor: 'pointer',
-    borderRadius: '2px',
-    fontFamily: 'var(--font-mono)',
-  },
-  clearBtn: {
-    color: 'var(--accent-red)',
-    fontWeight: 'bold' as const,
-    fontSize: '0.8rem',
-    padding: '0 5px',
-  },
-};
