@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { Line, LyricsDocument } from '../types/lyric';
 import { formatEnhancedLRC } from '../utils/exportLRC';
-import { reconstructLinesFromAnalysis } from '../utils/parser';
+import { reconstructLinesFromAnalysis, splitRunOnLines } from '../utils/parser';
 import { fetchPublishedTiming, publishLRC, storagePathFor, type PublishResult } from '../services/publish';
 import { dayOfYear, linesToTimings, timingsToLines } from '../utils/timings';
 import { signInUrl, type Account } from '../hooks/useAccount';
@@ -183,13 +183,12 @@ export function Toolbar({
       }
 
       if (published) {
-        onImportSyncedLines(timingsToLines(published));
-        setLyricsRaw(published.lyrics);
+        // Older publishes kept the transcript's two-lines-per-segment grouping; split those.
+        onImportSyncedLines(splitRunOnLines(timingsToLines(published)));
       } else if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
         onImportSyncedLines(
           reconstructLinesFromAnalysis(matchedRelease.lyricsSegments, matchedRelease.lyricsWords)
         );
-        setLyricsRaw(matchedRelease.lyrics || '');
       } else {
         const lyricsDb = await fetchAssetWithFallback('lyrics-fallback.json');
         const normalizedKey = song.storageTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
