@@ -25,6 +25,8 @@ export interface UseTapSync {
   prevWord: () => void;
   nextLine: () => void;
   reTimeLine: (lineIndex: number) => void;
+  /** Apply a change to the lines as one undo step, optionally moving the selection. */
+  updateLines: (fn: (lines: Line[]) => Line[], select?: { line: number; word: number }) => void;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -108,7 +110,7 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
   const jumpToWord = useCallback((lineIndex: number, wordIndex: number) => {
     if (lineIndex >= 0 && lineIndex < lines.length) {
       const line = lines[lineIndex];
-      if (wordIndex >= 0 && wordIndex < line.words.length) {
+      if (wordIndex === 0 || (wordIndex > 0 && wordIndex < line.words.length)) {
         setActiveLineIndex(lineIndex);
         setActiveWordIndex(wordIndex);
       }
@@ -312,6 +314,23 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     setActiveWordIndex(0);
   }, [lines, metadata, saveStateToHistory]);
 
+  const updateLines = useCallback(
+    (fn: (current: Line[]) => Line[], select?: { line: number; word: number }) => {
+      const next = fn(lines);
+      if (next === lines) return;
+      saveStateToHistory(lines, metadata);
+      setLinesState(next);
+      if (select) {
+        const line = Math.max(0, Math.min(select.line, next.length - 1));
+        setActiveLineIndex(line);
+        setActiveWordIndex(Math.max(0, Math.min(select.word, (next[line]?.words.length ?? 1) - 1)));
+      } else {
+        setActiveLineIndex((prev) => Math.max(0, Math.min(prev, next.length - 1)));
+      }
+    },
+    [lines, metadata, saveStateToHistory]
+  );
+
   const canUndo = useMemo(() => undoStack.length > 0, [undoStack]);
   const canRedo = useMemo(() => redoStack.length > 0, [redoStack]);
 
@@ -339,6 +358,7 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
     prevWord,
     nextLine,
     reTimeLine,
+    updateLines,
     canUndo,
     canRedo,
   };

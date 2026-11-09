@@ -1,6 +1,7 @@
 {
   "cleanUrls": true,
   "rewrites": [
+    { "source": "/media/:path*", "destination": "https://files.th3scr1b3.art/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
