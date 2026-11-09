@@ -101,6 +101,9 @@ function findRelease(releases: ReleaseEntry[] | undefined, song: ManifestItem): 
   );
 }
 
+// Published lines this long or shorter are kept as authored; longer ones are legacy run-ons.
+const PUBLISHED_SPLIT_MIN_WORDS = 10;
+
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export function Toolbar({
@@ -183,8 +186,9 @@ export function Toolbar({
       }
 
       if (published) {
-        // Older publishes kept the transcript's two-lines-per-segment grouping; split those.
-        onImportSyncedLines(splitRunOnLines(timingsToLines(published)));
+        // Older publishes kept the transcript's two-lines-per-segment grouping; split those
+        // long glued lines, but leave short lines as they were published.
+        onImportSyncedLines(splitRunOnLines(timingsToLines(published), PUBLISHED_SPLIT_MIN_WORDS));
       } else if (matchedRelease?.lyricsSegments && matchedRelease?.lyricsWords) {
         onImportSyncedLines(
           reconstructLinesFromAnalysis(matchedRelease.lyricsSegments, matchedRelease.lyricsWords)

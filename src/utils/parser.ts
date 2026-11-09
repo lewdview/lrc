@@ -58,9 +58,14 @@ export function parseLyrics(rawText: string): Line[] {
   });
 }
 
-/** Split run-on lines (more than LONG_LINE_WORDS, or two sung lines glued together) keeping timestamps. */
-export function splitRunOnLines(lines: Line[]): Line[] {
+/**
+ * Split lines holding two sung lines glued together, keeping timestamps. Lines of
+ * `minWords` words or fewer are left alone, so short lines someone deliberately grouped
+ * ("Take me to New York tonight") keep their shape.
+ */
+export function splitRunOnLines(lines: Line[], minWords = 0): Line[] {
   return lines.flatMap((line) => {
+    if (line.words.length <= minWords) return [line];
     const groups = splitIntoLyricLines(line.words.map((w) => w.text));
     if (groups.length < 2) return [line];
     let i = 0;
