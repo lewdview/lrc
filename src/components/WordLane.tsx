@@ -76,7 +76,10 @@ export function WordLane({
     return () => ro.disconnect();
   }, []);
 
-  // Timed words in song order, each knowing the room it has to move in.
+  // Timed words, each knowing the room it has to move in. The room comes from lyric
+  // order, not time order, so a word timed out of order can be dragged across the wrong
+  // neighbour to fix it; words stacked on one start can be dragged apart (moveWord pushes
+  // the stacked ones along).
   const blocks = useMemo<Block[]>(() => {
     const timed: Array<WordRef & { id: string; text: string; start: number }> = [];
     lines.forEach((line, l) =>
@@ -84,19 +87,18 @@ export function WordLane({
         if (w.timestamp !== null) timed.push({ line: l, word: i, id: w.id, text: w.text, start: w.timestamp });
       })
     );
-    timed.sort((a, b) => a.start - b.start);
-    return timed.map((t, i) => {
-      const next = timed[i + 1]?.start;
-      // Words stacked on the same start can be dragged apart: the furthest this one can go
-      // is the next word that really starts later (the stacked ones get pushed along).
-      const later = timed.slice(i + 1).find((x) => x.start > t.start)?.start;
+    const room = timed.map((t, i) => {
+      let min = 0;
+      for (let j = 0; j < i; j++) if (timed[j].start <= t.start) min = Math.max(min, timed[j].start + 10);
+      let max = Number.MAX_SAFE_INTEGER;
+      for (let j = i + 1; j < timed.length; j++) if (timed[j].start > t.start) max = Math.min(max, timed[j].start - 10);
+      return { min, max };
+    });
+    const byTime = timed.map((t, i) => ({ ...t, ...room[i] })).sort((a, b) => a.start - b.start);
+    return byTime.map((t, i) => {
+      const next = byTime[i + 1]?.start;
       const end = next !== undefined ? Math.min(next, t.start + MAX_BLOCK_MS) : t.start + LAST_BLOCK_MS;
-      return {
-        ...t,
-        end: Math.max(end, t.start + 1),
-        min: i > 0 ? timed[i - 1].start + 10 : 0,
-        max: later !== undefined ? later - 10 : Number.MAX_SAFE_INTEGER,
-      };
+      return { ...t, end: Math.max(end, t.start + 1) };
     });
   }, [lines]);
 

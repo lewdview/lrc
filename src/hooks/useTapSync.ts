@@ -317,9 +317,12 @@ export function useTapSync(initialLines: Line[] = [], initialMetadata: LyricsDoc
   const updateLines = useCallback(
     (fn: (current: Line[]) => Line[], select?: { line: number; word: number }) => {
       const next = fn(lines);
-      if (next === lines) return;
-      saveStateToHistory(lines, metadata);
-      setLinesState(next);
+      // No change to the lyrics: skip the history entry, but still move the selection
+      // (tapping a blank line must still step past it).
+      if (next !== lines) {
+        saveStateToHistory(lines, metadata);
+        setLinesState(next);
+      }
       if (select) {
         const line = Math.max(0, Math.min(select.line, next.length - 1));
         setActiveLineIndex(line);

@@ -213,7 +213,39 @@ export function timeLineFromTap(lines: Line[], lineIndex: number, startMs: numbe
       return { ...w, timestamp: t };
     });
   }
-  return lines.map((l, i) => (i === lineIndex ? { ...l, words } : l));
+  const result = lines.map((l, i) => (i === lineIndex ? { ...l, words } : l));
+  return refitPreviousLine(result, lineIndex, startMs);
+}
+
+// Gap left between a refitted line's last word and the tap on the next line.
+const REFIT_GAP_MS = 120;
+
+/**
+ * A line timed before its next line was tapped only had an estimate for its length. When
+ * the next line's tap lands inside it, squeeze its words (keeping their shape) so they all
+ * start before the tap.
+ */
+function refitPreviousLine(lines: Line[], lineIndex: number, tapMs: number): Line[] {
+  let p = lineIndex - 1;
+  while (p >= 0 && lines[p].words.length === 0) p--;
+  if (p < 0) return lines;
+  const ts = lines[p].words.map((w) => w.timestamp).filter((t): t is number => t !== null);
+  if (ts.length === 0) return lines;
+  const first = Math.min(...ts);
+  const last = Math.max(...ts);
+  const limit = tapMs - REFIT_GAP_MS;
+  if (last < tapMs || first >= limit) return lines;
+  const scale = last > first ? (limit - first) / (last - first) : 0;
+  return lines.map((l, i) =>
+    i !== p
+      ? l
+      : {
+          ...l,
+          words: l.words.map((w) =>
+            w.timestamp === null ? w : { ...w, timestamp: Math.round(first + (w.timestamp - first) * scale) }
+          ),
+        }
+  );
 }
 
 /** Spread a line's words evenly by length between its first word and the next line. */
