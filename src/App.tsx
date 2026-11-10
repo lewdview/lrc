@@ -1,180 +1,280 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAudioClock } from './hooks/useAudioClock';
 import { useTapSync } from './hooks/useTapSync';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useWaveform } from './hooks/useWaveform';
 import { Toolbar } from './components/Toolbar';
 import { AudioPlayer } from './components/AudioPlayer';
-import { LyricsEditor } from './components/LyricsEditor';
-import { SyncViewport } from './components/SyncViewport';
-import { Timeline } from './components/Timeline';
+import { ModeBar, type SyncMode } from './components/ModeBar';
+import { WordLane } from './components/WordLane';
+import { LineList } from './components/LineList';
+import { Inspector } from './components/Inspector';
+import { TapPanel } from './components/TapPanel';
 import { MetadataPanel } from './components/MetadataPanel';
 import { StatusBar } from './components/StatusBar';
+import { Modal } from './components/Modal';
 import { useAccount } from './hooks/useAccount';
 import { downloadLRC } from './utils/exportLRC';
 import { parseLyrics } from './utils/parser';
+import {
+  computeFlags,
+  lineStart,
+  lineText,
+  moveWord,
+  nextLineStart,
+  replaceLineTexts,
+  shiftFromLine,
+  spreadLineEvenly,
+  timeLineFromTap,
+  wordAt,
+  type WordRef,
+} from './utils/review';
 import type { Line, LyricsDocument } from './types/lyric';
 
 const LOCAL_STORAGE_KEY = 'th3scr1b3_lrc_session';
+const EMPTY_META = { title: '', artist: '', album: '', by: '', offset: 0 };
+
+const hasTimings = (lines: Line[]) => lines.some((l) => l.words.some((w) => w.timestamp !== null));
 
 export default function App() {
-  const [rawText, setRawText] = useState('');
-  const [viewTab, setViewTab] = useState<'editor' | 'sync'>('editor');
+  const [mode, setMode] = useState<SyncMode>('review');
   const [lastSaved, setLastSaved] = useState<string | null>(null);
+  const [zoomMs, setZoomMs] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 700 ? 4000 : 8000));
+  const [looping, setLooping] = useState(false);
+  const [pasteDraft, setPasteDraft] = useState<string | null>(null);
 
-  // Shared th3scr1b3.art login
   const account = useAccount();
-
-  // Audio system
   const audioClock = useAudioClock();
+  const waveform = useWaveform(audioClock.audioUrl);
+  const tapSync = useTapSync([], EMPTY_META);
+  const { lines } = tapSync;
+  const selected: WordRef = { line: tapSync.activeLineIndex, word: tapSync.activeWordIndex };
 
-  // Lyrics and sync system
-  const tapSync = useTapSync([], { title: '', artist: '', album: '', by: '', offset: 0 });
-
-  // Load session on mount
+  // Restore the last session.
   useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.rawText) setRawText(parsed.rawText);
-        if (parsed.lines) tapSync.setLines(parsed.lines);
-        if (parsed.metadata) tapSync.setMetadata(parsed.metadata);
-        if (parsed.lines && parsed.lines.length > 0) {
-          setViewTab('sync');
-        }
-      } catch (e) {
-        console.error('Failed to restore session from LocalStorage', e);
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed.lines) && parsed.lines.length) {
+        tapSync.setLines(parsed.lines);
+        if (!hasTimings(parsed.lines)) setMode('lines');
+      } else if (typeof parsed.rawText === 'string' && parsed.rawText.trim()) {
+        tapSync.setLines(parseLyrics(parsed.rawText));
+        setMode('lines');
       }
+      if (parsed.metadata) tapSync.setMetadata(parsed.metadata);
+    } catch (e) {
+      console.error('Failed to restore session from LocalStorage', e);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync rawText back whenever lines change due to word editing
-  useEffect(() => {
-    if (tapSync.lines && tapSync.lines.length > 0) {
-      const regeneratedRaw = tapSync.lines
-        .map((line) => line.words.map((w) => w.text).join(' '))
-        .join('\n');
-      if (regeneratedRaw !== rawText) {
-        setRawText(regeneratedRaw);
-      }
-    }
-  }, [tapSync.lines]);
-
-  // Autosave periodically
+  // Autosave.
   useEffect(() => {
     const interval = setInterval(() => {
-      const payload = {
-        rawText,
-        lines: tapSync.lines,
-        metadata: tapSync.metadata,
-      };
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
-
-      const now = new Date();
-      setLastSaved(
-        `${now.getHours().toString().padStart(2, '0')}:${now
-          .getMinutes()
-          .toString()
-          .padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
-      );
+      try {
+        localStorage.setItem(
+          LOCAL_STORAGE_KEY,
+          JSON.stringify({ lines: tapSync.lines, metadata: tapSync.metadata })
+        );
+        const now = new Date();
+        setLastSaved(now.toTimeString().slice(0, 8));
+      } catch {
+        // storage full or blocked: keep working
+      }
     }, 5000);
-
     return () => clearInterval(interval);
-  }, [rawText, tapSync.lines, tapSync.metadata]);
+  }, [tapSync.lines, tapSync.metadata]);
 
-  // Auto-scroll/advance line to follow playhead if already time-mapped
-  useEffect(() => {
-    if (!audioClock.isPlaying) return;
-
-    const activeWord = tapSync.lines[tapSync.activeLineIndex]?.words?.[tapSync.activeWordIndex];
-    const isReviewMode = activeWord && activeWord.timestamp !== null;
-
-    if (!isReviewMode) return;
-
-    let playingLineIndex = -1;
-    let maxTime = -1;
-
-    tapSync.lines.forEach((line, lIdx) => {
-      line.words.forEach((word) => {
-        if (word.timestamp !== null && word.timestamp <= audioClock.currentTime) {
-          if (word.timestamp > maxTime) {
-            maxTime = word.timestamp;
-            playingLineIndex = lIdx;
-          }
-        }
-      });
-    });
-
-    if (playingLineIndex !== -1 && playingLineIndex !== tapSync.activeLineIndex) {
-      tapSync.jumpToWord(playingLineIndex, 0);
+  const flags = useMemo(() => computeFlags(lines), [lines]);
+  const totalWords = useMemo(() => lines.reduce((n, l) => n + l.words.length, 0), [lines]);
+  const flagTimes = useMemo(() => {
+    const out: number[] = [];
+    for (const f of flags) {
+      const w = lines[f.line]?.words[f.word];
+      const t = w?.timestamp ?? lineStart(lines[f.line]) ?? nextLineStart(lines, f.line);
+      if (t !== null && t !== undefined) out.push(t);
     }
-  }, [
-    audioClock.currentTime,
-    audioClock.isPlaying,
-    tapSync.lines,
-    tapSync.activeLineIndex,
-    tapSync.activeWordIndex,
-    tapSync.jumpToWord,
-  ]);
+    return out;
+  }, [flags, lines]);
+  const playing = audioClock.currentTime > 0 ? wordAt(lines, audioClock.currentTime) : null;
 
-  // Handle parsing callback
-  const handleLyricsParsed = (newLines: Line[]) => {
+  // ---- loop the selected line ----
+  const loopRange = useMemo(() => {
+    const line = lines[selected.line];
+    const start = line ? lineStart(line) : null;
+    if (start === null || !line) return null;
+    const timed = line.words.map((w) => w.timestamp).filter((t): t is number => t !== null);
+    const next = nextLineStart(lines, selected.line);
+    const end = next !== null && next > start ? next : Math.max(...timed) + 1500;
+    return { start: Math.max(0, start - 250), end: end + 100 };
+  }, [lines, selected.line]);
+
+  useEffect(() => {
+    if (!looping || !loopRange || !audioClock.isPlaying) return;
+    if (audioClock.currentTime >= loopRange.end || audioClock.currentTime < loopRange.start - 1000) {
+      audioClock.seek(loopRange.start);
+    }
+  }, [looping, loopRange, audioClock]);
+
+  const toggleLoop = useCallback(() => {
+    setLooping((on) => {
+      if (!on && loopRange) {
+        audioClock.seek(loopRange.start);
+        audioClock.play();
+      }
+      return !on;
+    });
+  }, [loopRange, audioClock]);
+
+  // ---- selection ----
+  const select = useCallback(
+    (line: number, word: number, seek = false) => {
+      tapSync.jumpToWord(line, word);
+      const ts = lines[line]?.words[word]?.timestamp;
+      if (seek && ts != null && !audioClock.isPlaying) audioClock.seek(ts);
+    },
+    [tapSync, lines, audioClock]
+  );
+
+  const selectWord = (delta: number) => {
+    let { line, word } = selected;
+    word += delta;
+    while (line >= 0 && line < lines.length && (word < 0 || word >= lines[line].words.length)) {
+      if (word < 0) {
+        line -= 1;
+        if (line >= 0) word = lines[line].words.length - 1;
+      } else {
+        line += 1;
+        word = 0;
+      }
+    }
+    if (line >= 0 && line < lines.length) select(line, Math.max(0, word), true);
+  };
+
+  const selectLine = (delta: number) => {
+    const line = Math.max(0, Math.min(lines.length - 1, selected.line + delta));
+    select(line, 0, true);
+  };
+
+  const nextToCheck = () => {
+    if (flags.length === 0) return;
+    const after = flags.find((f) => f.line > selected.line || (f.line === selected.line && f.word > selected.word));
+    const f = after ?? flags[0];
+    tapSync.jumpToWord(f.line, f.word);
+    const ts = lines[f.line].words[f.word].timestamp ?? lineStart(lines[f.line]);
+    if (ts !== null) audioClock.seek(Math.max(0, ts - 800));
+  };
+
+  // ---- edits ----
+  const setTimestamp = (line: number, word: number, ms: number | null) => tapSync.setWordTimestamp(line, word, ms);
+
+  const setNow = () => {
+    const now = Math.round(audioClock.currentTime);
+    tapSync.updateLines(
+      (ls) => ls.map((l, i) => (i !== selected.line ? l : { ...l, words: l.words.map((w, j) => (j === selected.word ? { ...w, timestamp: now } : w)) })),
+      // while playing, move on so T can follow the song word by word
+      audioClock.isPlaying ? nextRef(selected) : selected
+    );
+  };
+
+  function nextRef(ref: WordRef): WordRef {
+    const line = lines[ref.line];
+    if (line && ref.word < line.words.length - 1) return { line: ref.line, word: ref.word + 1 };
+    for (let l = ref.line + 1; l < lines.length; l++) if (lines[l].words.length) return { line: l, word: 0 };
+    return ref;
+  }
+
+  const nextNonEmptyLine = (from: number) => {
+    for (let l = from + 1; l < lines.length; l++) if (lines[l].words.length) return l;
+    return from;
+  };
+
+  const tap = () => {
+    const now = Math.round(audioClock.currentTime);
+    if (mode === 'words') {
+      tapSync.syncNextWord(now);
+      return;
+    }
+    tapSync.updateLines((ls) => timeLineFromTap(ls, selected.line, now), { line: nextNonEmptyLine(selected.line), word: 0 });
+  };
+
+  const tapBack = () => {
+    if (mode === 'words') tapSync.prevWord();
+    else {
+      let l = selected.line - 1;
+      while (l > 0 && lines[l].words.length === 0) l--;
+      select(Math.max(0, l), 0);
+    }
+  };
+
+  const replay = () => audioClock.seek(Math.max(0, audioClock.currentTime - 3000));
+
+  const replaceLines = (start: number, count: number, texts: string[], sel: WordRef) =>
+    tapSync.updateLines((ls) => replaceLineTexts(ls, start, count, texts), sel);
+
+  // ---- loading songs and lyrics ----
+  const importLines = (newLines: Line[]) => {
     tapSync.setLines(newLines);
-    setViewTab('sync');
+    tapSync.jumpToWord(0, 0);
+    setLooping(false);
+    setMode(hasTimings(newLines) ? 'review' : 'lines');
   };
 
-  // Build the live doc object for exports
-  const activeDocument: LyricsDocument = {
-    metadata: tapSync.metadata,
-    lines: tapSync.lines,
+  // Plain lyrics (no timings) from the catalog: parse them straight into lines.
+  const loadPlainLyrics = (text: string) => {
+    if (!text.trim() || text.trim().startsWith('//')) {
+      importLines([]);
+      setPasteDraft('');
+      return;
+    }
+    importLines(parseLyrics(text));
   };
 
-  const handleDownload = () => {
-    downloadLRC(activeDocument);
+  const applyPaste = () => {
+    if (pasteDraft === null) return;
+    const texts = pasteDraft.split(/\r?\n/);
+    const next = replaceLineTexts(lines, 0, lines.length, texts, { splitRunOns: true });
+    tapSync.updateLines(() => next, { line: 0, word: 0 });
+    if (!hasTimings(next)) setMode('lines');
+    setPasteDraft(null);
   };
+
+  const activeDocument: LyricsDocument = { metadata: tapSync.metadata, lines };
 
   const handleClear = () => {
     if (window.confirm('Are you sure you want to clear the session? This will wipe your progress.')) {
       localStorage.removeItem(LOCAL_STORAGE_KEY);
-      setRawText('');
       tapSync.setLines([]);
-      tapSync.setMetadata({ title: '', artist: '', album: '', by: '', offset: 0 });
+      tapSync.setMetadata(EMPTY_META);
       audioClock.setAudioUrl(null);
-      setViewTab('editor');
+      setLooping(false);
     }
   };
 
-  // Keyboard shortcut actions mapping
-  const keyboardActions = {
-    currentTime: audioClock.currentTime,
-    activeLineIndex: tapSync.activeLineIndex,
-    activeWordIndex: tapSync.activeWordIndex,
-    syncNextWord: tapSync.syncNextWord,
-    nudgeWordTimestamp: tapSync.nudgeWordTimestamp,
-    clearWordTimestamp: tapSync.clearWordTimestamp,
-    undo: tapSync.undo,
-    redo: tapSync.redo,
-    jumpToFirstUnsynced: tapSync.jumpToFirstUnsynced,
-    jumpToLastWord: tapSync.jumpToLastWord,
-    prevWord: tapSync.prevWord,
-    nextLine: tapSync.nextLine,
-  };
-
-  // Enable shortcuts in sync tab only
-  useKeyboardShortcuts(keyboardActions, viewTab === 'sync');
-
-  const tabs: Array<{ id: 'editor' | 'sync'; label: string; onClick: () => void }> = [
-    { id: 'editor', label: 'Lyrics', onClick: () => setViewTab('editor') },
+  useKeyboardShortcuts(
     {
-      id: 'sync',
-      label: 'Sync words',
-      onClick: () => {
-        // Parse on the way in if the text was never parsed.
-        if (tapSync.lines.length === 0 && rawText.trim()) handleLyricsParsed(parseLyrics(rawText));
-        else setViewTab('sync');
-      },
+      mode,
+      isPlaying: audioClock.isPlaying,
+      togglePlay: () => (audioClock.isPlaying ? audioClock.pause() : audioClock.play()),
+      play: audioClock.play,
+      replay,
+      tap,
+      tapBack,
+      selectWord,
+      selectLine,
+      nudge: (d) => tapSync.nudgeWordTimestamp(selected.line, selected.word, d),
+      setNow,
+      clear: () => tapSync.clearWordTimestamp(selected.line, selected.word),
+      nextToCheck,
+      toggleLoop,
+      editLine: () => window.dispatchEvent(new Event('lrc:edit-line')),
+      undo: tapSync.undo,
+      redo: tapSync.redo,
     },
-  ];
+    pasteDraft === null
+  );
 
   return (
     <div className="app">
@@ -184,14 +284,11 @@ export default function App() {
         document={activeDocument}
         account={account}
         setMetadata={tapSync.setMetadata}
-        setLyricsRaw={setRawText}
+        setLyricsRaw={loadPlainLyrics}
         setAudioUrl={audioClock.setAudioUrl}
-        onDownload={handleDownload}
+        onDownload={() => downloadLRC(activeDocument)}
         onClear={handleClear}
-        onImportSyncedLines={(lines) => {
-          tapSync.setLines(lines);
-          setViewTab('sync');
-        }}
+        onImportSyncedLines={importLines}
       />
 
       <AudioPlayer
@@ -206,60 +303,100 @@ export default function App() {
         skip={audioClock.skip}
         setPlaybackRate={audioClock.setPlaybackRate}
         audioUrl={audioClock.audioUrl}
+        peaks={waveform.peaks}
+        flagTimes={flagTimes}
+        looping={looping}
+        onToggleLoop={toggleLoop}
       />
 
-      <nav className="tabs" role="tablist" aria-label="Workflow">
-        {tabs.map((tab, i) => (
-          <button
-            key={tab.id}
-            role="tab"
-            aria-selected={viewTab === tab.id}
-            className={`tab ${viewTab === tab.id ? 'active' : ''}`}
-            onClick={tab.onClick}
-          >
-            <span className="tab-index">{String(i + 1).padStart(2, '0')}</span>
-            {tab.label}
-          </button>
-        ))}
-      </nav>
+      <ModeBar
+        mode={mode}
+        onMode={setMode}
+        total={totalWords}
+        toCheck={flags.length}
+        onNextToCheck={nextToCheck}
+        zoomMs={zoomMs}
+        onZoom={setZoomMs}
+        onPaste={() => setPasteDraft(lines.map(lineText).join('\n'))}
+      />
+
+      <WordLane
+        lines={lines}
+        flags={flags}
+        currentTime={audioClock.currentTime}
+        isPlaying={audioClock.isPlaying}
+        selected={selected}
+        peaks={waveform.peaks}
+        zoomMs={zoomMs}
+        onSelect={(l, w) => tapSync.jumpToWord(l, w)}
+        onSetTimestamp={(l, w, ms) => tapSync.updateLines((ls) => moveWord(ls, { line: l, word: w }, ms))}
+        onSeek={audioClock.seek}
+      />
 
       <main className="main">
-        {viewTab === 'editor' ? (
-          <LyricsEditor rawText={rawText} setRawText={setRawText} onParsed={handleLyricsParsed} />
-        ) : (
-          <div className="workspace">
-            <Timeline
-              lines={tapSync.lines}
+        <div className="workspace">
+          <LineList
+            lines={lines}
+            flags={flags}
+            selected={selected}
+            playing={playing}
+            onSelect={(l, w) => tapSync.jumpToWord(l, w)}
+            onSeek={audioClock.seek}
+            onReplaceLines={replaceLines}
+          />
+          {mode === 'review' ? (
+            <Inspector
+              lines={lines}
+              flags={flags}
+              selected={selected}
+              playing={playing}
               currentTime={audioClock.currentTime}
-              activeLineIndex={tapSync.activeLineIndex}
-              activeWordIndex={tapSync.activeWordIndex}
-              onSeek={audioClock.seek}
+              isPlaying={audioClock.isPlaying}
+              onSetTimestamp={setTimestamp}
               onNudge={tapSync.nudgeWordTimestamp}
-              onSetTimestamp={tapSync.setWordTimestamp}
-              onSelectWord={tapSync.jumpToWord}
-              onEditWordText={tapSync.editWordText}
-              onAddWord={tapSync.addWordToLine}
-              onDeleteWord={tapSync.deleteWord}
+              onSpreadLine={(l) => tapSync.updateLines((ls) => spreadLineEvenly(ls, l))}
+              onShiftFrom={(l, d) => tapSync.updateLines((ls) => shiftFromLine(ls, l, d))}
+              onDeleteLine={(l) => replaceLines(l, 1, [], { line: Math.max(0, l - 1), word: 0 })}
             />
-            <SyncViewport
-              lines={tapSync.lines}
-              activeLineIndex={tapSync.activeLineIndex}
-              activeWordIndex={tapSync.activeWordIndex}
-              currentTime={audioClock.currentTime}
-              onWordClick={tapSync.jumpToWord}
-              onReTimeLine={tapSync.reTimeLine}
-              onEditWordText={tapSync.editWordText}
-              onAddWord={tapSync.addWordToLine}
-              onDeleteWord={tapSync.deleteWord}
-              onAddLine={tapSync.addLine}
+          ) : (
+            <TapPanel
+              mode={mode}
+              lines={lines}
+              lineIndex={selected.line}
+              wordIndex={selected.word}
+              isPlaying={audioClock.isPlaying}
+              onTap={() => (audioClock.isPlaying ? tap() : audioClock.play())}
+              onBack={tapBack}
+              onReplay={replay}
             />
-          </div>
-        )}
+          )}
+        </div>
       </main>
 
       <MetadataPanel metadata={tapSync.metadata} onChange={tapSync.setMetadata} />
 
-      <StatusBar lines={tapSync.lines} lastSaved={lastSaved} />
+      <StatusBar lines={lines} lastSaved={lastSaved} mode={mode} />
+
+      {pasteDraft !== null && (
+        <Modal title="Paste lyrics" onClose={() => setPasteDraft(null)}>
+          <p className="modal-note">
+            One line per sung line. Words that match the current lyrics keep their timing; new or changed words come back
+            to be timed. Very long lines are split where a new sung line starts.
+          </p>
+          <textarea
+            className="editor-text paste-text"
+            aria-label="Lyrics"
+            value={pasteDraft}
+            placeholder="Paste the lyrics here…"
+            onChange={(e) => setPasteDraft(e.target.value)}
+          />
+          <div className="modal-row">
+            <button className="btn btn-primary btn-lg" onClick={applyPaste} disabled={!pasteDraft.trim()}>
+              Use these lyrics
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

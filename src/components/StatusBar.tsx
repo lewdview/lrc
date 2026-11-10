@@ -1,20 +1,15 @@
 import type { Line } from '../types/lyric';
+import type { SyncMode } from './ModeBar';
+import { SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 
 interface StatusBarProps {
   lines: Line[];
   lastSaved: string | null;
+  mode: SyncMode;
 }
 
-const SHORTCUTS: Array<[string, string]> = [
-  ['Space', 'Sync'],
-  ['←/→', 'Nudge 100ms'],
-  ['⇧ ←/→', 'Nudge 10ms'],
-  ['Ctrl Z', 'Undo'],
-  ['⌫', 'Prev word'],
-  ['Enter', 'Next line'],
-];
 
-export function StatusBar({ lines, lastSaved }: StatusBarProps) {
+export function StatusBar({ lines, lastSaved, mode }: StatusBarProps) {
   let totalWords = 0;
   let syncedWords = 0;
   for (const line of lines) {
@@ -41,7 +36,7 @@ export function StatusBar({ lines, lastSaved }: StatusBarProps) {
       </div>
 
       <div className="status-keys">
-        {SHORTCUTS.map(([key, label]) => (
+        {SHORTCUTS[mode].map(([key, label]) => (
           <span key={key}>
             <kbd>{key}</kbd> {label}
           </span>

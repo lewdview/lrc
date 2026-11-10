@@ -1,4 +1,5 @@
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
+import { PEAK_MS, peakBetween } from '../hooks/useWaveform';
 
 interface AudioPlayerProps {
   isPlaying: boolean;
@@ -12,11 +13,16 @@ interface AudioPlayerProps {
   skip: (seconds: number) => void;
   setPlaybackRate: (rate: number) => void;
   audioUrl: string | null;
+  peaks: Float32Array | null;
+  /** Song times (ms) of words that need a look, drawn as ticks on the overview. */
+  flagTimes: number[];
+  looping: boolean;
+  onToggleLoop: () => void;
 }
 
-const PEAKS = 120;
-// Deterministic decorative waveform (no audio decoding).
-const PEAK_HEIGHTS = Array.from({ length: PEAKS }, (_, i) => Math.max(15, ((i * 37) % 100) % 85));
+const BARS = 160;
+// Placeholder bars until the song is decoded.
+const FLAT = Array.from({ length: BARS }, (_, i) => 0.18 + 0.12 * Math.abs(Math.sin(i * 0.7)));
 
 const formatTimer = (ms: number) => {
   const mins = Math.floor(ms / 60000);
@@ -37,9 +43,20 @@ export function AudioPlayer({
   skip,
   setPlaybackRate,
   audioUrl,
+  peaks,
+  flagTimes,
+  looping,
+  onToggleLoop,
 }: AudioPlayerProps) {
   const waveformRef = useRef<HTMLDivElement>(null);
   const progress = duration > 0 ? currentTime / duration : 0;
+
+  const bars = useMemo(() => {
+    if (!peaks) return FLAT;
+    const total = duration > 0 ? duration : peaks.length * PEAK_MS;
+    const slice = total / BARS;
+    return Array.from({ length: BARS }, (_, i) => Math.max(0.04, peakBetween(peaks, i * slice, (i + 1) * slice)));
+  }, [peaks, duration]);
 
   const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!waveformRef.current || duration === 0) return;
@@ -50,9 +67,44 @@ export function AudioPlayer({
   return (
     <section className="transport" aria-label="Playback">
       <div className="transport-row">
+        <div className="transport-group">
+          {isPlaying ? (
+            <button className="btn btn-primary btn-transport" onClick={pause}>
+              Pause
+            </button>
+          ) : (
+            <button className="btn btn-go btn-transport" onClick={play} disabled={!audioUrl}>
+              Play
+            </button>
+          )}
+          <button className="btn btn-sm" onClick={stop} disabled={!audioUrl}>
+            Stop
+          </button>
+          <button className="btn btn-sm" onClick={() => skip(-3)} title="Back 3 seconds (R)">
+            −3s
+          </button>
+          <button className="btn btn-sm" onClick={() => skip(5)}>
+            +5s
+          </button>
+          <button
+            className={`btn btn-sm ${looping ? 'btn-on' : ''}`}
+            aria-pressed={looping}
+            onClick={onToggleLoop}
+            title="Loop the selected line (L)"
+          >
+            Loop line <kbd>L</kbd>
+          </button>
+        </div>
+
+        <div className="clock" aria-live="off">
+          <span className="clock-now">{formatTimer(currentTime)}</span>
+          <span className="clock-sep"> / </span>
+          <span className="clock-total">{formatTimer(duration)}</span>
+        </div>
+
         <div className="transport-group" role="group" aria-label="Playback speed">
           <span className="kicker">Speed</span>
-          {[0.25, 0.5, 0.75, 1.0, 1.25].map((rate) => (
+          {[0.5, 0.75, 1.0].map((rate) => (
             <button
               key={rate}
               className={`btn btn-sm ${playbackRate === rate ? 'btn-on' : ''}`}
@@ -62,12 +114,6 @@ export function AudioPlayer({
               {rate}x
             </button>
           ))}
-        </div>
-
-        <div className="clock" aria-live="off">
-          <span className="clock-now">{formatTimer(currentTime)}</span>
-          <span className="clock-sep"> / </span>
-          <span className="clock-total">{formatTimer(duration)}</span>
         </div>
       </div>
 
@@ -82,45 +128,20 @@ export function AudioPlayer({
         aria-valuenow={Math.round(currentTime)}
       >
         <div className="wave-peaks">
-          {PEAK_HEIGHTS.map((height, i) => (
+          {bars.map((v, i) => (
             <div
               key={i}
-              className={`wave-peak ${duration > 0 && i / PEAKS <= progress ? 'played' : ''}`}
-              style={{ height: `${height}%` }}
+              className={`wave-peak ${duration > 0 && i / BARS <= progress ? 'played' : ''}`}
+              style={{ height: `${Math.round(v * 100)}%` }}
             />
           ))}
         </div>
+        {duration > 0 &&
+          flagTimes.map((t, i) => (
+            <span key={i} className="wave-flag" style={{ left: `${(t / duration) * 100}%` }} aria-hidden="true" />
+          ))}
         {duration > 0 && <div className="wave-head" style={{ left: `${progress * 100}%` }} />}
         {!audioUrl && <div className="wave-empty">Pick a song or upload audio</div>}
-      </div>
-
-      <div className="transport-row">
-        <div className="transport-group">
-          <button className="btn btn-sm" onClick={() => skip(-5)}>-5s</button>
-          <button className="btn btn-sm" onClick={() => seek(currentTime - 100)}>-100ms</button>
-          <button className="btn btn-sm" onClick={() => seek(currentTime - 10)}>-10ms</button>
-        </div>
-
-        <div className="transport-group">
-          <button className="btn btn-danger btn-transport" onClick={stop}>
-            Stop
-          </button>
-          {isPlaying ? (
-            <button className="btn btn-primary btn-transport" onClick={pause}>
-              Pause
-            </button>
-          ) : (
-            <button className="btn btn-go btn-transport" onClick={play} disabled={!audioUrl}>
-              Play
-            </button>
-          )}
-        </div>
-
-        <div className="transport-group">
-          <button className="btn btn-sm" onClick={() => seek(currentTime + 10)}>+10ms</button>
-          <button className="btn btn-sm" onClick={() => seek(currentTime + 100)}>+100ms</button>
-          <button className="btn btn-sm" onClick={() => skip(5)}>+5s</button>
-        </div>
       </div>
     </section>
   );

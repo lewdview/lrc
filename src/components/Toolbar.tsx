@@ -169,6 +169,8 @@ export function Toolbar({
   const handleSelectSong = async (song: ManifestItem) => {
     setSelectedSong(song);
     setReleaseTitle(null);
+    // Hand the keyboard back to the editor so Space/N/L work straight away.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     let title = song.storageTitle;
 
     // Lyrics: timings already published from here first, then the release data's word

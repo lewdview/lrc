@@ -25,7 +25,7 @@ export function splitIntoLyricLines(tokens: string[]): string[][] {
   tokens.forEach((token, i) => {
     const prev = current[current.length - 1];
     const remaining = tokens.length - i;
-    const capital = /^["'(\[]?[A-Z]/.test(token) && !PRONOUN_I.test(token);
+    const capital = /^["'([]?[A-Z]/.test(token) && !PRONOUN_I.test(token);
     const breakHere =
       current.length > 0 &&
       ((prev !== undefined && SENTENCE_END.test(prev) && remaining >= 2) ||
